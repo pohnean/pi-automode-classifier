@@ -368,19 +368,22 @@ function line(item: TranscriptItem, limits: TranscriptLimits): string {
 // `<transcript>` with the action last and never cut; the caller checks that it fits the window.
 // The lines before it are cut to maxEntries and maxChars, tool lines before user messages and the
 // oldest first, so a run of cheap calls cannot push the user's own words out.
+// Without an action item last (the classifier's conversation, whose call is sent on its own), every
+// item is context and maxEntries counts only those.
 export function buildTranscript(items: TranscriptItem[], limits: TranscriptLimits): string {
-  const action = items.at(-1);
+  const action = items.at(-1)?.kind === "action" ? items.at(-1) : undefined;
+  const room = action ? limits.maxEntries - 1 : limits.maxEntries;
   const context: { user: boolean; text: string }[] = [];
   let others = 0;
   // Newest first, so tool lines past maxEntries are not rendered at all.
-  for (let i = items.length - 2; i >= 0; i--) {
+  for (let i = items.length - (action ? 2 : 1); i >= 0; i--) {
     const user = items[i].kind === "user";
     if (!user && ++others >= limits.maxEntries) continue;
     context.push({ user, text: line(items[i], limits) });
   }
   context.reverse();
   let size = context.reduce((n, c) => n + c.text.length + 1, 0);
-  while (context.length && (context.length >= limits.maxEntries || size > limits.maxChars)) {
+  while (context.length && (context.length > room || size > limits.maxChars)) {
     const at = context.findIndex((c) => !c.user);
     size -= context.splice(at < 0 ? 0 : at, 1)[0].text.length + 1;
   }

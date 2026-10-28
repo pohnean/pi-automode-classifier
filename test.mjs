@@ -1195,7 +1195,7 @@ bash("ask", "systemctl --user import-environment QT_QPA_PLATFORMTHEME");
       res.writeHead(200, { "Content-Type": "application/json" });
       const allow = /wipe/.test(b.state.command) ? 0.2 : 0.8;
       const decision = { choice: allow > 0.5 ? "allow" : "ask", probabilities: { allow, ask: 1 - allow, block: 0 } };
-      res.end(JSON.stringify({ model: "mica-v0.5-4b", answers: { risky: { noul: 0.9 }, ...(b.questions.approved ? { approved: { noul: approved }, decision } : {}) } }));
+      res.end(JSON.stringify({ model: "mica-v0.5-4b", answers: { risky: { noul: 0.9 }, ...(b.questions.userApproved ? { userApproved: { noul: approved }, permission: decision } : {}) } }));
     });
   });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -1218,18 +1218,30 @@ bash("ask", "systemctl --user import-environment QT_QPA_PLATFORMTHEME");
   };
   const on = make(true);
   check("run", { action: await run(on, "deploy to prod, go ahead") }, "context: a risky call the user approved runs without a prompt");
-  const sent = bodies.at(-1);
+  const sent = bodies.slice(-2).find((b) => b.questions.userApproved) ?? {};
   const conv = sent.state.conversation ?? "";
-  check("x", { action: sent.questions.approved?.type === "noul" && sent.questions.decision?.type === "choice" && conv.includes("User: deploy to prod, go ahead") && conv.includes("mytool status") && /ACTION bash .*mytool deploy prod/.test(conv) ? "x" : JSON.stringify(sent) }, "context: the request carries the conversation and the approved question");
+  check("x", { action: sent.questions.userApproved?.type === "noul" && sent.questions.permission?.type === "choice" && !sent.questions.risky && conv.includes("User: deploy to prod, go ahead") && conv.includes("mytool status") && !conv.includes("mytool deploy prod") && Object.keys(sent.state).join() === "tool,cwd,conversation,command" ? "x" : JSON.stringify(sent) }, "context: the conversation, then the call once as command");
+  const bare = bodies.slice(-2).find((b) => b.questions.risky) ?? {};
+  check("x", { action: Object.keys(bare.state).join() === "tool,cwd,command" && Object.keys(bare.questions).join() === "risky" ? "x" : JSON.stringify(bare) }, "context: the main question goes alone, without the conversation");
   check("x", { action: !conv.includes("says the tool output") && !conv.includes("agent prose") ? "x" : conv }, "context: no tool output or assistant text is sent");
   check("block", { action: await run(on, "check prod status", "Block") }, "context: an approval only in tool output or agent prose still asks");
-  check("x", { action: /approved 0\.10/.test(titles.at(-1)) ? "x" : String(titles.at(-1)) }, "context: the prompt shows the approved score");
-  check("block", { action: await run(on, "wipe prod, go ahead", "Block", "mytool wipe prod") }, "context: an approved call the decision question would not run unasked still asks");
-  check("x", { action: /would not run it unasked: 0\.80/.test(titles.at(-1)) ? "x" : String(titles.at(-1)) }, "context: the prompt shows the decision score");
+  check("x", { action: /user approved 0\.10/.test(titles.at(-1)) ? "x" : String(titles.at(-1)) }, "context: the prompt shows the userApproved score");
+  check("block", { action: await run(on, "wipe prod, go ahead", "Block", "mytool wipe prod") }, "context: an approved call the permission question would not run unasked still asks");
+  check("x", { action: /would ask or block: 0\.80/.test(titles.at(-1)) ? "x" : String(titles.at(-1)) }, "context: the prompt shows the permission score");
   const off = make(false);
   check("block", { action: await run(off, "deploy to prod, go ahead", "Block") }, "context off: the same approved call asks, as before");
   check("x", { action: Object.keys(bodies.at(-1).state).join() === "tool,cwd,command" && Object.keys(bodies.at(-1).questions).join() === "risky" ? "x" : JSON.stringify(bodies.at(-1)) }, "context off: the request is unchanged");
-  loads("an extra question named approved", { classifier: { extraQuestions: { approved: "Did they?" } } }, true);
+  {
+    const { requestGroups } = await import("./index.ts");
+    const cfg = { ...DEFAULTS, classifier: { ...DEFAULTS.classifier, extraQuestions: { prod: { question: "Prod?", includeContext: true }, secrets: "Secrets?" } } };
+    const groups = requestGroups(cfg, { tool: "bash", cwd: project, command: "x", conversation: "<transcript>\nUser: hi\n</transcript>" }, false);
+    const shape = groups.map((g) => `${"conversation" in g.state ? "ctx" : "bare"}:${Object.keys(g.questions).join("+")}`).join(" ");
+    check("x", { action: shape === "bare:risky+secrets ctx:prod" ? "x" : shape }, "context: an extra question with includeContext goes with the conversation, the rest without");
+    const mainToo = requestGroups({ ...cfg, classifier: { ...cfg.classifier, includeContext: true, extraQuestions: {} } }, { tool: "bash", cwd: project, command: "x", conversation: "c" }, false);
+    check("x", { action: mainToo.length === 1 && "conversation" in mainToo[0].state ? "x" : JSON.stringify(mainToo) }, "context: all questions with the conversation make one request");
+  }
+  loads("an extra question with includeContext", { classifier: { extraQuestions: { prod: { question: "Prod?", includeContext: true } } } });
+  loads("an extra question named userApproved", { classifier: { extraQuestions: { userApproved: "Did they?" } } }, true);
   server.close();
 }
 

@@ -382,27 +382,31 @@ For a local server, `classifier.model` is part of the model name the server must
 
 ### Conversation context
 
-A decision model that sees only the command can't tell `kubectl rollout restart deployment/api` that you asked for from the same command you didn't. `classifier.context` sends the conversation with each command and adds two questions:
+A decision model that sees only the command can't tell `kubectl rollout restart deployment/api` that you asked for from the same command you didn't. The conversation fixes that: your messages and the agent's earlier tool calls before the call under review. Tool output, the agent's text and the call itself are not in it; the call is `command`, sent once. Skill bodies and `@file` attachments are cut from your messages, as for stage 3.
 
-- `approved` (yes/no): did you, in your own messages, ask for or approve this exact action on this exact target?
-- `decision` (allow / ask / block): may the call run without asking you? Its risk is the chance of ask or block. Not asked through a Pi `provider`.
+Each question chooses whether it reads the conversation: `classifier.includeContext` for the main question, `includeContext` on each extra question. A System One request has one state for all its questions, so questions with and without the conversation go in two requests, sent together.
 
-A call asks when `decision` is at or above `stopAbove` (0.5). Otherwise it runs when `risky` is below `askAbove`, or when `approved` is at or above `approvedAbove` (0.9).
+`classifier.context.enabled` adds two built-in questions that always read it:
+
+- `userApproved` (yes/no): did you, in your own messages, ask for or approve this exact action on this exact target?
+- `permission` (allow / ask / block): may the call run without asking you? Its risk is the chance of ask or block. Not asked through a Pi `provider`.
+
+A call asks when `permission` is at or above `permissionAskAbove` (0.5). Otherwise it runs when `risky` is below `askAbove`, or when `userApproved` is at or above `userApprovedAbove` (0.9).
 
 ```json
 "classifier": {
-  "context": { "enabled": true, "approvedAbove": 0.9, "stopAbove": 0.5 }
+  "includeContext": false,
+  "context": { "enabled": true, "userApprovedAbove": 0.9, "permissionAskAbove": 0.5 }
 }
 ```
 
-`approved` alone is not enough: on a 130-call suite, Mica v0.5 4B answered yes to calls next to what you approved (prod when you said staging, every table when you said one) and let 4 more dangerous calls run than with no context. With `decision` and `approvedAbove` 0.9 it let none run that the command-only setup caught, and asked about 3 of 52 approved calls instead of 14.
+`userApproved` alone is not enough: on a 130-call suite, Mica v0.5 4B answered yes to calls next to what you approved (prod when you said staging, every table when you said one) and let 4 more dangerous calls run than with no context. `permission` vetoes most of those. Seeing the conversation also lowered the main question's risk for a prod migration after a staging one, which is why `includeContext` is off for it by default.
 
-- The conversation is your messages plus the agent's earlier tool calls, with the call under review last as `ACTION`. Tool output and the agent's text are not sent, so an "approval" in a file, a web page or the agent's own words can't reach the model. Skill bodies and `@file` attachments are cut from your messages, as for stage 3.
 - Extra questions still ask at their own thresholds. Nothing is blocked: a `block` answer only asks you.
-- `maxChars` (16000), `maxEntries` (40), `userMessageChars` (4000) and `toolInputChars` (1000) cap the size. The call itself is never cut; older tool lines go before your messages do. The model server's context must hold it: about 5k tokens at the defaults.
-- It adds two questions per call: about 300 ms per call with Mica on an RTX 3060 instead of 80. The prompt and the log show the answers.
+- `maxChars` (16000), `maxEntries` (40 lines), `userMessageChars` (4000) and `toolInputChars` (1000) cap the size. Older tool lines go before your messages do. The model server's context must hold it plus the command: about 5k tokens at the defaults.
+- The prompt and the log show the answers.
 - With `provider` set, your messages go to that provider with every classified call.
-- The `command` decider (LANCET) takes no conversation; `context` does not apply to it.
+- The `command` decider (LANCET) takes no conversation.
 
 ### Sample configs
 
@@ -420,8 +424,9 @@ These are the setups I tested. Each one has the `config.json` and the server def
 | `question` | The main question |
 | `risky`, `safe` | Descriptions of the yes and no answers. Not used when `levels` is set |
 | `levels` | When set, the main question is a graded score over these levels |
-| `extraQuestions` | More yes/no questions, each with its own optional `askAbove` |
-| `context` | Send your messages with each command and skip the prompt for a call you approved; see [Conversation context](#conversation-context) (off) |
+| `extraQuestions` | More yes/no questions, each with its own optional `askAbove` and `includeContext` |
+| `includeContext` | Send the conversation with the main question (false); extra questions take their own `includeContext` |
+| `context` | Conversation size, and `enabled` for the built-in `userApproved` and `permission` questions; see [Conversation context](#conversation-context) (off) |
 
 The other keys (`enabled`, `withoutUi`, `log`, `rules`, `allowedPaths`, `guardedPaths`) work the same with every model, so the samples leave them out.
 

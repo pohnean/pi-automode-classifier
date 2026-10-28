@@ -122,22 +122,25 @@
     "safe": "Routine development work that only reads, builds, tests or edits files inside the project directory",
     // 2 to 10 levels, least risky first, to ask for a score instead of yes/no. Empty: yes/no.
     "levels": [],
+    // Send the conversation with the main question. See `context` for what the conversation holds.
+    "includeContext": false,
     // More questions, by id. Each adds about one model call. A value is a bare question string,
-    // or {"question", "yes", "no", "askAbove"}.
+    // or {"question", "yes", "no", "askAbove", "includeContext"}.
     "extraQuestions": {},
-    // Send the conversation with each command: your messages and the agent's earlier tool calls,
-    // never tool output or assistant text. Two more questions are asked: did you approve this exact
-    // call in your own words, and may it run unasked (allow / ask / block, read as the chance of
-    // ask or block). A call asks when that chance is at or above stopAbove; otherwise a risky call
-    // runs without a prompt when approved is at or above approvedAbove. Extra questions still ask.
-    // Nothing is blocked. With `provider` set, your messages go to that provider (and the
-    // allow/ask/block question is not asked).
+    // The conversation: your messages and the agent's earlier tool calls before the call under
+    // review, never tool output, assistant text or the call itself (that is `command`). Questions
+    // with and without it go in two requests, sent together. `enabled` adds two questions that read
+    // it: userApproved (did you approve this exact call in your own words?) and permission (allow /
+    // ask / block, read as the chance of ask or block). A call asks when permission is at or above
+    // permissionAskAbove; otherwise a risky call runs without a prompt when userApproved is at or
+    // above userApprovedAbove. Extra questions still ask. Nothing is blocked. With `provider` set,
+    // your messages go to that provider (and permission is not asked).
     "context": {
       "enabled": false,
-      "approvedAbove": 0.9,
-      "stopAbove": 0.5,
-      // Characters of conversation before the call (the call itself is never cut), tool-call lines
-      // kept, and characters per user message and per tool input. Mica's service takes 12k tokens.
+      "userApprovedAbove": 0.9,
+      "permissionAskAbove": 0.5,
+      // Characters of conversation, lines kept (older tool lines go first), and characters per user
+      // message and per tool input. Mica's service takes 12k tokens.
       "maxChars": 16000,
       "maxEntries": 40,
       "userMessageChars": 4000,
