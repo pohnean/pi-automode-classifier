@@ -1289,6 +1289,23 @@ bash("ask", "systemctl --user import-environment QT_QPA_PLATFORMTHEME");
   const before = bodies.length;
   check("block", { action: await call("bash", { command: "cat > inline.sh <<'EOF'\npsql prod -c 'DROP DATABASE app'\nEOF\nbash inline.sh" }, "Block") }, "scripts: a script written and run in one command goes to the classifier");
   check("x", { action: bodies.length === before + 1 && bodies.at(-1).state.files === undefined ? "x" : JSON.stringify(bodies.at(-1)) }, "scripts: its text is already in the command, so no files");
+  {
+    // With the chat decider too: the classifier reads the script first, and a script it cannot
+    // take whole goes to the chat decider with its text.
+    const port = server.address().port;
+    const top = { decider: ["classifier", "llm"], classifier: { ...DEFAULTS.classifier, endpoint: `http://127.0.0.1:${port}`, model: "mica", askAbove: 0.5, scripts: { ...DEFAULTS.classifier.scripts, maxChars: 400 } } };
+    const both = llmHandler({}, [asst("<block>no</block>")], top);
+    fs.writeFileSync(path.join(dir, "ok.sh"), "make test\n");
+    await both.tool("write", { path: path.join(dir, "ok.sh"), content: "make test\n" }, { cwd: dir });
+    const n = bodies.length;
+    const ran = !(await both.tool("bash", { command: "bash ok.sh" }, { cwd: dir }))?.block;
+    check("x", { action: ran && bodies.length === n + 1 && bodies.at(-1).state.files?.includes("make test") && both.sent.length === 0 ? "x" : JSON.stringify({ ran, sent: both.sent.length, body: bodies.at(-1) }) }, "scripts + chat decider: the classifier reads the script and passes it, no chat call");
+    fs.writeFileSync(path.join(dir, "big.sh"), "echo hi\n".repeat(100));
+    await both.tool("write", { path: path.join(dir, "big.sh"), content: "" }, { cwd: dir });
+    const m = bodies.length;
+    const ranBig = !(await both.tool("bash", { command: "bash big.sh" }, { cwd: dir }))?.block;
+    check("x", { action: ranBig && bodies.length === m && both.sent.length > 0 && JSON.stringify(both.sent).includes("echo hi") ? "x" : JSON.stringify({ ranBig, mica: bodies.length - m, sent: both.sent.length }) }, "scripts + chat decider: a script over maxChars goes to the chat decider with its text");
+  }
   // A file of the project checkout goes to the classifier too, unless scripts.project is off.
   const proj = (checkProjectScripts) => makeScope(dir, [], { project: (p) => p.startsWith(dir), checkScripts: true, checkProjectScripts });
   fs.mkdirSync(path.join(dir, "scripts"));

@@ -1136,7 +1136,7 @@ export default function (pi: ExtensionAPI, overrides: Partial<Config> = {}) {
       files,
       project: (p) => inCheckout(p, roots),
       chatDecider: config.decider.includes("llm"),
-      checkScripts: config.classifier.scripts.enabled && config.decider.includes("classifier") && !config.decider.includes("llm"),
+      checkScripts: config.classifier.scripts.enabled && config.decider.some((d) => d === "classifier" || d === "llm"),
       checkProjectScripts: config.classifier.scripts.project,
     });
     let subject: string;
@@ -1166,7 +1166,7 @@ export default function (pi: ExtensionAPI, overrides: Partial<Config> = {}) {
     // A call allowed while it was not critical asks again once the same text is, for example a
     // script that a download has since replaced.
     // The scripts the call runs, read now. A script changed since the user allowed the call asks again.
-    const scripts = verdict.action === "classify" && verdict.files?.length && !config.decider.includes("llm") ? readScripts(verdict.files, ctx.cwd, config.classifier.scripts.maxChars) : undefined;
+    const scripts = verdict.action === "classify" && verdict.files?.length ? readScripts(verdict.files, ctx.cwd, config.classifier.scripts.maxChars) : undefined;
     const scriptHash = scripts && "text" in scripts ? createHash("sha256").update(scripts.text).digest("hex").slice(0, 16) : "";
     const key = `${verdict.critical ? "critical" : ""}\0${event.toolName}\0${ctx.cwd}\0${subject}\0${scriptHash}`;
     // The user allowed this exact call for the session, so no model gets to block it again.
@@ -1184,16 +1184,14 @@ export default function (pi: ExtensionAPI, overrides: Partial<Config> = {}) {
     if (verdict.action === "classify") {
       // A script goes to the chat decider when there is one, which reads it; otherwise to the
       // classifier with its text as `files`. The process classifier takes no files.
-      const chain = verdict.ruleAsk
-        ? config.decider.filter((d) => d === "llm")
-        : verdict.files
-          ? config.decider.includes("llm")
-            ? ["llm" as const]
-            : config.decider.filter((d) => d === "classifier")
-          : config.decider;
+      // A script goes through the deciders with its text: the classifier gets it as `files`, the
+      // chat decider in the action. The process classifier takes no files. A script the classifier
+      // cannot take (too long, unreadable, binary) goes to the chat decider, or asks.
+      const llmOnly = config.decider.filter((d) => d === "llm");
+      const chain = verdict.ruleAsk ? llmOnly : verdict.files ? config.decider.filter((d) => d !== "command") : config.decider;
       if (scripts && "problem" in scripts) {
         entry.scripts = scripts.problem;
-        chain.length = 0;
+        chain.splice(0, chain.length, ...llmOnly);
         verdict = { ...verdict, reason: scripts.problem };
       } else if (scripts) entry.scriptChars = scripts.text.length;
       const steps: Record<string, unknown>[] = [];

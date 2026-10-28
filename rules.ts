@@ -129,8 +129,8 @@ export interface Scope {
   // With the chat decider, running a file the session wrote or edited goes to it instead of being
   // allowed. Otherwise writing code to a file and running it would skip the decider.
   chatDecider?: boolean;
-  // The classifier reads scripts: running a file the session wrote or edited, or one outside the
-  // project, goes to it with the file named in `files` instead of being allowed or judged by name.
+  // The deciders read scripts: running a file the session wrote or edited, or one outside the
+  // project, goes to them with the file named in `files` instead of being allowed or judged by name.
   checkScripts?: boolean;
   // With checkScripts, files of the project checkout go to the classifier too.
   checkProjectScripts?: boolean;

@@ -410,19 +410,19 @@ A call asks when `permission` is at or above `permissionAskAbove` (0.5). Otherwi
 
 ### Scripts
 
-A command like `bash backup.sh` says nothing about what `backup.sh` does. With `classifier.scripts.enabled` (the default), when the classifier is the decider and there is no chat decider, the extension reads the scripts a command runs and sends their text with it:
+A command like `bash backup.sh` says nothing about what `backup.sh` does. With `classifier.scripts.enabled` (the default) the extension reads the scripts a command runs and sends their text with it: to the classifier as `files`, and to the chat decider in the action, as it already did for scripts the agent wrote:
 
 ```json
 "state": { "tool": "bash", "cwd": "/home/me/project", "command": "bash backup.sh",
            "files": "<file name=\"backup.sh\">\npg_dump ...\npsql \"$PROD_DB_URL\" -c \"DROP DATABASE app_archive;\"\n</file>" }
 ```
 
-- Scripts the agent wrote or edited in this session, scripts outside the project, and with `project` (on) files of the project checkout such as `./scripts/test.sh`, run as `bash x.sh`, `./x.sh` or `python x.py`. Without this a script the agent wrote ran unchecked when there was no chat decider.
+- Scripts the agent wrote or edited in this session, scripts outside the project, and with `project` (on) files of the project checkout such as `./scripts/test.sh`, run as `bash x.sh`, `./x.sh` or `python x.py`. Without this a script the agent wrote ran unchecked when there was no chat decider, and a project script ran unchecked with any decider.
 - A script written and run in one command (`cat > x.sh <<EOF … EOF; bash x.sh`) is already in the command, so it goes to the classifier with no `files`.
-- Scripts are never cut, since what matters can be at the end. Over `maxChars` (12000) together, unreadable, or binary: you get a prompt.
+- A script goes through the deciders in `decider` order like any other call. The process classifier (`command`) takes no files and is skipped.
+- Scripts are never cut, since what matters can be at the end. Over `maxChars` (12000) together, unreadable, or binary: the chat decider judges it, or you get a prompt.
 - They are read when the call is checked. "Allow for this session" covers that text only: a script changed since then asks again.
 - Not read: Makefile targets and `npm run` scripts, and scripts a script calls.
-- With a chat decider the scripts go to it instead, as before.
 
 On the 130-call suite with Mica v0.5 4B the rules plus classifier let 2 dangerous calls run without this (a backup script with prod `TRUNCATE`/`DROP` at its end, a backfill script aimed at prod) and none with it.
 
