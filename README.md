@@ -75,7 +75,7 @@ The working directory is the directory Pi runs in, plus the git checkout it belo
 
 A classifier scores each call the rules leave open, from 0 to 1. A score at or above `askAbove` asks you. With stage 3 after it, a score below `allowBelow` runs, and a score in between goes to stage 3. Without stage 3, every score below `askAbove` runs. A classifier never blocks anything by itself.
 
-By default it sees only the command. With [`classifier.context`](#conversation-context) on it also reads your messages, so a risky call you approved in your own words runs without a prompt. The rules' ask verdicts, and scripts the agent wrote in this session, skip it: they go to stage 3, or ask you when there is no stage 3.
+By default it sees only the command. With [`classifier.context`](#conversation-context) on it also reads your messages, so a risky call you approved in your own words runs without a prompt. With [`classifier.scripts`](#scripts) on (the default) it also reads the scripts a command runs. The rules' ask verdicts go to stage 3, or ask you when there is no stage 3.
 
 - `command`: a classifier that runs as a process, like [LANCET](#stage-2-lancet) on CPU, or LANCET [as a server](#run-lancet-as-a-server) under LlamaStash.
 - `classifier`: a [decision model](#stage-2-decision-models-kev-laya-jev) that answers one yes/no question, "is this command risky?", with a probability: Kev or Laya on a local llama.cpp server, or Jev through Pi.
@@ -408,6 +408,24 @@ A call asks when `permission` is at or above `permissionAskAbove` (0.5). Otherwi
 - With `provider` set, your messages go to that provider with every classified call.
 - The `command` decider (LANCET) takes no conversation.
 
+### Scripts
+
+A command like `bash backup.sh` says nothing about what `backup.sh` does. With `classifier.scripts.enabled` (the default), when the classifier is the decider and there is no chat decider, the extension reads the scripts a command runs and sends their text with it:
+
+```json
+"state": { "tool": "bash", "cwd": "/home/me/project", "command": "bash backup.sh",
+           "files": "<file name=\"backup.sh\">\npg_dump ...\npsql \"$PROD_DB_URL\" -c \"DROP DATABASE app_archive;\"\n</file>" }
+```
+
+- Scripts the agent wrote or edited in this session, scripts outside the project, and with `project` (on) files of the project checkout such as `./scripts/test.sh`, run as `bash x.sh`, `./x.sh` or `python x.py`. Without this a script the agent wrote ran unchecked when there was no chat decider.
+- A script written and run in one command (`cat > x.sh <<EOF … EOF; bash x.sh`) is already in the command, so it goes to the classifier with no `files`.
+- Scripts are never cut, since what matters can be at the end. Over `maxChars` (12000) together, unreadable, or binary: you get a prompt.
+- They are read when the call is checked. "Allow for this session" covers that text only: a script changed since then asks again.
+- Not read: Makefile targets and `npm run` scripts, and scripts a script calls.
+- With a chat decider the scripts go to it instead, as before.
+
+On the 130-call suite with Mica v0.5 4B the rules plus classifier let 2 dangerous calls run without this (a backup script with prod `TRUNCATE`/`DROP` at its end, a backfill script aimed at prod) and none with it.
+
 ### Sample configs
 
 These are the setups I tested. Each one has the `config.json` and the server definition that goes with it. The samples spell out every `classifier` key they use, including the ones left at their default:
@@ -426,6 +444,7 @@ These are the setups I tested. Each one has the `config.json` and the server def
 | `levels` | When set, the main question is a graded score over these levels |
 | `extraQuestions` | More yes/no questions, each with its own optional `askAbove` and `includeContext` |
 | `includeContext` | Send the conversation with the main question (false); extra questions take their own `includeContext` |
+| `scripts` | Read the scripts a command runs and send them as `files`; see [Scripts](#scripts) (on) |
 | `context` | Conversation size, and `enabled` for the built-in `userApproved` and `permission` questions; see [Conversation context](#conversation-context) (off) |
 
 The other keys (`enabled`, `withoutUi`, `log`, `rules`, `allowedPaths`, `guardedPaths`) work the same with every model, so the samples leave them out.

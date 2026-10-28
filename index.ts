@@ -33,6 +33,7 @@
 
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
+import { createHash } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -99,6 +100,19 @@ export interface ClassifierConfig {
   // earlier tool calls, never tool output or assistant text; the call itself is `command`. With
   // `provider` set, your messages go there.
   context: ClassifierContext;
+  // Read the scripts a command runs and send them with it as `files`, instead of allowing a script
+  // the session wrote or judging a script by its name. Only with the classifier decider and no
+  // chat decider (the chat decider reads them already).
+  scripts: ClassifierScripts;
+}
+
+export interface ClassifierScripts {
+  enabled: boolean;
+  // Also files of the project checkout, such as ./scripts/test.sh. Off: those run unchecked.
+  project: boolean;
+  // Scripts longer than this together, unreadable ones and binaries ask you: a script is never cut,
+  // since what matters can be at its end.
+  maxChars: number;
 }
 
 export interface ClassifierContext {
@@ -172,6 +186,7 @@ export const DEFAULTS: Config = {
     levels: [],
     includeContext: false,
     extraQuestions: {},
+    scripts: { enabled: true, project: true, maxChars: 12000 },
     context: { enabled: false, userApprovedAbove: 0.9, permissionAskAbove: 0.5, maxChars: 16000, maxEntries: 40, userMessageChars: 4000, toolInputChars: 1000 },
   },
   llm: DEFAULT_LLM,
@@ -229,6 +244,7 @@ const SCHEMA: Schema = {
     levels: (v) => isStrings(v) && (v as string[]).length !== 1 && (v as string[]).length <= 10,
     includeContext: isBool,
     extraQuestions: (v) => isObject(v) && Object.entries(v).every(([id, q]) => !["risky", "userApproved", "permission"].includes(id) && isQuestion(q)),
+    scripts: { enabled: isBool, project: isBool, maxChars: atLeast(1) },
     context: {
       enabled: isBool,
       userApprovedAbove: isThreshold,
@@ -392,14 +408,14 @@ export function requestGroups(config: Config, state: Record<string, string>, via
   if (state.conversation === undefined) return [{ state, questions: all }];
   const withContext = contextQuestions(config);
   const { conversation, ...bare } = state;
-  const { command, ...rest } = bare;
+  const { command, files, ...rest } = bare;
   const pick = (keep: boolean) => Object.fromEntries(Object.entries(all).filter(([id]) => withContext.has(id) === keep));
   return [
     { state: bare, questions: pick(false) },
     // In the order things happened: the conversation, then the call. Mica asked about 11 of 52
     // approved calls this way, 12 with command first or with the call as the conversation's last
     // line (130-case suite).
-    { state: { ...rest, conversation, command }, questions: pick(true) },
+    { state: { ...rest, conversation, command, ...(files === undefined ? {} : { files }) }, questions: pick(true) },
   ].filter((g) => Object.keys(g.questions).length);
 }
 
@@ -879,6 +895,26 @@ function fileContents(paths: string[]): Record<string, string> {
   );
 }
 
+// The scripts a call runs, for the classifier: each as <file name="...">, the path relative to the
+// working directory. A problem instead when one cannot be read, is binary, or they are too long
+// together; the call then asks, since a cut script could hide its end.
+export function readScripts(paths: string[], cwd: string, maxChars: number): { text: string } | { problem: string } {
+  const parts: string[] = [];
+  for (const p of paths) {
+    const name = within(p, cwd) ? path.relative(cwd, p) : p;
+    let body: string;
+    try {
+      body = fs.readFileSync(p, "utf8");
+    } catch (e) {
+      return { problem: `cannot read ${name}, which the command runs (${(e as NodeJS.ErrnoException).code ?? (e as Error).message})` };
+    }
+    if (body.includes("\0")) return { problem: `${name}, which the command runs, is a binary` };
+    parts.push(`<file name="${name}">\n${body.replace(/\n?$/, "\n")}</file>`);
+  }
+  const text = parts.join("\n");
+  return text.length > maxChars ? { problem: `the scripts the command runs are ${text.length} chars, over classifier.scripts.maxChars (${maxChars})` } : { text };
+}
+
 // ---- git ----
 
 function git(dir: string, ...args: string[]): string | undefined {
@@ -1100,6 +1136,8 @@ export default function (pi: ExtensionAPI, overrides: Partial<Config> = {}) {
       files,
       project: (p) => inCheckout(p, roots),
       chatDecider: config.decider.includes("llm"),
+      checkScripts: config.classifier.scripts.enabled && config.decider.includes("classifier") && !config.decider.includes("llm"),
+      checkProjectScripts: config.classifier.scripts.project,
     });
     let subject: string;
     let verdict: Verdict;
@@ -1127,7 +1165,10 @@ export default function (pi: ExtensionAPI, overrides: Partial<Config> = {}) {
     };
     // A call allowed while it was not critical asks again once the same text is, for example a
     // script that a download has since replaced.
-    const key = `${verdict.critical ? "critical" : ""}\0${event.toolName}\0${ctx.cwd}\0${subject}`;
+    // The scripts the call runs, read now. A script changed since the user allowed the call asks again.
+    const scripts = verdict.action === "classify" && verdict.files?.length && !config.decider.includes("llm") ? readScripts(verdict.files, ctx.cwd, config.classifier.scripts.maxChars) : undefined;
+    const scriptHash = scripts && "text" in scripts ? createHash("sha256").update(scripts.text).digest("hex").slice(0, 16) : "";
+    const key = `${verdict.critical ? "critical" : ""}\0${event.toolName}\0${ctx.cwd}\0${subject}\0${scriptHash}`;
     // The user allowed this exact call for the session, so no model gets to block it again.
     if (verdict.action === "classify" && sessionAllowed.has(key)) {
       finish("allow", "session");
@@ -1141,7 +1182,20 @@ export default function (pi: ExtensionAPI, overrides: Partial<Config> = {}) {
     // command, so it cannot tell whether the user asked for it or what the file holds.
     let toLlm = false;
     if (verdict.action === "classify") {
-      const chain = verdict.ruleAsk || verdict.files ? config.decider.filter((d) => d === "llm") : config.decider;
+      // A script goes to the chat decider when there is one, which reads it; otherwise to the
+      // classifier with its text as `files`. The process classifier takes no files.
+      const chain = verdict.ruleAsk
+        ? config.decider.filter((d) => d === "llm")
+        : verdict.files
+          ? config.decider.includes("llm")
+            ? ["llm" as const]
+            : config.decider.filter((d) => d === "classifier")
+          : config.decider;
+      if (scripts && "problem" in scripts) {
+        entry.scripts = scripts.problem;
+        chain.length = 0;
+        verdict = { ...verdict, reason: scripts.problem };
+      } else if (scripts) entry.scriptChars = scripts.text.length;
       const steps: Record<string, unknown>[] = [];
       for (const [i, stage] of chain.entries()) {
         if (stage === "llm") {
@@ -1150,6 +1204,7 @@ export default function (pi: ExtensionAPI, overrides: Partial<Config> = {}) {
         }
         const last = i === chain.length - 1;
         const state: Record<string, string> = { tool: event.toolName, cwd: ctx.cwd, command: subject };
+        if (stage !== "command" && scripts && "text" in scripts && scripts.text) state.files = scripts.text;
         if (stage !== "command" && contextQuestions(config).size) {
           state.conversation = conversationFor(config, (ctx.sessionManager?.getBranch?.() ?? []) as { message?: Record<string, unknown> }[], { tool: event.toolName, input, id: event.toolCallId }, decided);
           entry.conversationChars = state.conversation.length;

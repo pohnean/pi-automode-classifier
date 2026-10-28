@@ -1245,6 +1245,62 @@ bash("ask", "systemctl --user import-environment QT_QPA_PLATFORMTHEME");
   server.close();
 }
 
+{
+  // classifier.scripts: the classifier reads the scripts a command runs. The stand-in server says
+  // risky when the request's files hold "DROP".
+  const http = await import("node:http");
+  const bodies = [];
+  const server = http.createServer((req, res) => {
+    let body = "";
+    req.on("data", (c) => (body += c));
+    req.on("end", () => {
+      const b = JSON.parse(body);
+      bodies.push(b);
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ model: "mica", answers: { risky: { noul: /DROP/.test(b.state.files ?? "") || /DROP/.test(b.state.command) ? 0.9 : 0.05 } } }));
+    });
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const dir = fs.mkdtempSync(path.join(home, "pi-amc-scripts-"));
+  const h = {};
+  extension({ on: (name, handler) => (h[name] = handler), registerCommand: () => {} }, { log: false, decider: ["classifier"], classifier: { ...DEFAULTS.classifier, endpoint: `http://127.0.0.1:${server.address().port}`, model: "mica", askAbove: 0.5, scripts: { ...DEFAULTS.classifier.scripts, maxChars: 400 } } });
+  const call = async (toolName, input, answer) => {
+    if (answer) answers.push(answer);
+    const res = await h.tool_call({ toolName, input }, { cwd: dir, hasUI: true, ui });
+    return res?.block ? "block" : "run";
+  };
+  const write = async (name, content) => {
+    fs.writeFileSync(path.join(dir, name), content);
+    return call("write", { path: path.join(dir, name), content });
+  };
+  await write("backup.sh", "pg_dump prod > /tmp/x\n");
+  check("run", { action: await call("bash", { command: "bash backup.sh" }) }, "scripts: a harmless script the agent wrote goes to the classifier and runs");
+  check("x", { action: bodies.at(-1)?.state.files === '<file name="backup.sh">\npg_dump prod > /tmp/x\n</file>' ? "x" : JSON.stringify(bodies.at(-1)) }, "scripts: the request carries the script's text as files");
+  await write("backup.sh", "pg_dump prod > /tmp/x\npsql prod -c 'DROP DATABASE app'\n");
+  check("block", { action: await call("bash", { command: "bash backup.sh" }, "Allow for this session") === "run" ? "block" : "run" }, "scripts: a harmful line at the end of the script asks");
+  check("run", { action: await call("bash", { command: "bash backup.sh" }) }, "scripts: allowed for the session, the same script runs");
+  fs.appendFileSync(path.join(dir, "backup.sh"), "psql prod -c 'DROP TABLE users'\n");
+  check("block", { action: await call("bash", { command: "bash backup.sh" }, "Block") }, "scripts: the script changed since it was allowed, so it asks again");
+  await write("long.sh", "echo hi\n".repeat(100));
+  check("block", { action: await call("bash", { command: "bash long.sh" }, "Block") }, "scripts: scripts over maxChars ask instead of being cut");
+  check("x", { action: /over classifier\.scripts\.maxChars/.test(titles.at(-1)) ? "x" : String(titles.at(-1)) }, "scripts: the prompt says why");
+  fs.rmSync(path.join(dir, "backup.sh"));
+  check("block", { action: await call("bash", { command: "bash backup.sh" }, "Block") }, "scripts: an unreadable script asks");
+  const before = bodies.length;
+  check("block", { action: await call("bash", { command: "cat > inline.sh <<'EOF'\npsql prod -c 'DROP DATABASE app'\nEOF\nbash inline.sh" }, "Block") }, "scripts: a script written and run in one command goes to the classifier");
+  check("x", { action: bodies.length === before + 1 && bodies.at(-1).state.files === undefined ? "x" : JSON.stringify(bodies.at(-1)) }, "scripts: its text is already in the command, so no files");
+  // A file of the project checkout goes to the classifier too, unless scripts.project is off.
+  const proj = (checkProjectScripts) => makeScope(dir, [], { project: (p) => p.startsWith(dir), checkScripts: true, checkProjectScripts });
+  fs.mkdirSync(path.join(dir, "scripts"));
+  fs.writeFileSync(path.join(dir, "scripts/t.sh"), "make test\n");
+  const v = bashVerdict("./scripts/t.sh", proj(true));
+  check("x", { action: v.action === "classify" && v.files?.[0] === path.join(dir, "scripts/t.sh") ? "x" : JSON.stringify(v) }, "scripts: a project script goes to the classifier with its file");
+  check("allow", bashVerdict("./scripts/t.sh", proj(false)), "scripts: with scripts.project off, a project script runs as before");
+  check("allow", bashVerdict("./scripts/t.sh", makeScope(dir, [], { project: (p) => p.startsWith(dir) })), "scripts: without checkScripts, the rules are unchanged");
+  fs.rmSync(dir, { recursive: true });
+  server.close();
+}
+
 fs.rmSync(process.env.PI_CODING_AGENT_DIR, { recursive: true });
 
 console.log(failures ? `\n${failures} FAILED` : "\nall passed");
