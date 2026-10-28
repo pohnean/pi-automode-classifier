@@ -9,6 +9,8 @@ import path from "node:path";
 
 // Keeps the handler tests away from the real config file.
 process.env.PI_CODING_AGENT_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "pi-automode-classifier-test-"));
+// The decision log goes to a temp dir, never the user's real one.
+process.env.XDG_STATE_HOME = fs.mkdtempSync(path.join(os.tmpdir(), "amc-test-state-"));
 const { bashVerdict, compileRules, fileVerdict, makeScope } = await import("./rules.ts");
 
 const home = os.homedir();

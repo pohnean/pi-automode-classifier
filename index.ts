@@ -643,6 +643,8 @@ function askClassifierProcess(config: Config, state: Record<string, string>, sig
 // one built from Pi's SDK in a bench script.
 export interface ChatRegistry {
   find(provider: string, modelId: string): unknown;
+  // omp's registry has no streamSimple (see chatStream) but has getApiKey.
+  getApiKey?(model: unknown): Promise<string | undefined>;
   streamSimple(
     model: unknown,
     context: { systemPrompt?: string; messages: { role: string; content: string }[] },
@@ -709,6 +711,22 @@ function resolveModel(registry: ChatRegistry, config: Config, sessionModel?: Rec
 
 const thinks = ({ model }: Resolved) => Boolean(model.reasoning);
 
+// Pi's registry streams itself. omp's registry does not: omp exports streamSimple from its pi-ai
+// package instead (it maps the @earendil-works names onto its own) and the key comes from the
+// registry.
+async function chatStream(
+  registry: ChatRegistry,
+  model: Record<string, unknown>,
+  context: Parameters<ChatRegistry["streamSimple"]>[1],
+  options: Record<string, unknown>,
+): Promise<ReturnType<ChatRegistry["streamSimple"]>> {
+  if (typeof registry.streamSimple === "function") return registry.streamSimple(model, context, options);
+  const ai = (await import("@earendil-works/pi-ai" as string)) as { streamSimple?: ChatRegistry["streamSimple"] };
+  if (typeof ai.streamSimple !== "function") throw new Error("neither the model registry nor pi-ai has streamSimple");
+  const apiKey = await registry.getApiKey?.(model);
+  return ai.streamSimple(model, context, apiKey ? { ...options, apiKey } : options);
+}
+
 async function askOnce(
   registry: ChatRegistry,
   resolved: Resolved,
@@ -722,7 +740,7 @@ async function askOnce(
   const signal = opts.signal ? AbortSignal.any([opts.signal, timeout]) : timeout;
   let stream: ReturnType<ChatRegistry["streamSimple"]>;
   try {
-    stream = registry.streamSimple(resolved.model, { systemPrompt: system, messages: [{ role: "user", content: message }] }, { ...options, signal });
+    stream = await chatStream(registry, resolved.model, { systemPrompt: system, messages: [{ role: "user", content: message }] }, { ...options, signal });
   } catch (e) {
     // A model without credentials throws here rather than returning an error message.
     return { error: (e as Error).message };
@@ -1327,9 +1345,21 @@ export default function (pi: ExtensionAPI, overrides: Partial<Config> = {}) {
     const covers = dir ? `changes in ${dir}` : verdict.pattern ? `"${verdict.pattern}"` : undefined;
     const forSession = covers ? `Allow ${covers} for this session` : "Allow for this session";
     const always = covers && !(verdict.pattern && verdict.fromAsk) ? `Always allow ${covers}` : undefined;
+    // Logged when shown as well as when answered: a prompt cancelled, timed out or left open when the
+    // session ends would otherwise leave no trace of why the call was held.
+    log(config, { ...entry, outcome: "ask", by: "prompt" });
     const answer = prompts.then(() => ctx.ui.select(title, ["Allow once", forSession, ...(always ? [always] : []), "Block"], { signal: ctx.signal }));
     prompts = answer.catch(() => undefined);
-    const choice = await answer;
+    let choice: string | undefined;
+    try {
+      choice = await answer;
+    } catch (e) {
+      counts.blocked++;
+      held("rejected-by-user");
+      log(config, { ...entry, outcome: "block", by: "prompt-error", error: (e as Error).message });
+      throw e;
+    }
+    if (choice === undefined) entry.cancelled = true;
     const wider = choice === forSession || (always !== undefined && choice === always);
     if (wider) {
       if (verdict.dir) allowedPaths.push(verdict.dir);
