@@ -872,8 +872,8 @@ Stage 3, the chat decider:
 
 Stage 2, a classifier:
 
-- The model only sees the command and the working directory. It can't tell whether you asked for the action.
-- Script files are never read. `bash deploy.sh` is judged on that command line and on where the file came from.
+- Without `classifier.context` the model only sees the command and the working directory. It can't tell whether you asked for the action. With it, a well-hidden extra step inside an action you approved can get through.
+- Scripts are read one level deep: a script that calls another script is judged without the second one's text.
 - A command longer than the server's context always gets a prompt. A bigger context doesn't make long commands safe to check: Kev-0.8B scored a 3,700-character command with `rm -rf ~/Documents` as its last step at 0.15, and at 0.29 with the same step first. The rules don't have this problem, they parse the whole command at any length.
 
 Any setup:
