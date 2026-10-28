@@ -75,7 +75,7 @@ The working directory is the directory Pi runs in, plus the git checkout it belo
 
 A classifier scores each call the rules leave open, from 0 to 1. A score at or above `askAbove` asks you. With stage 3 after it, a score below `allowBelow` runs, and a score in between goes to stage 3. Without stage 3, every score below `askAbove` runs. A classifier never blocks anything by itself.
 
-It sees only the command. So the rules' ask verdicts, and scripts the agent wrote in this session, skip it: they go to stage 3, or ask you when there is no stage 3.
+By default it sees only the command. With [`classifier.context`](#conversation-context) on it also reads your messages, so a risky call you approved in your own words runs without a prompt. The rules' ask verdicts, and scripts the agent wrote in this session, skip it: they go to stage 3, or ask you when there is no stage 3.
 
 - `command`: a classifier that runs as a process, like [LANCET](#stage-2-lancet) on CPU, or LANCET [as a server](#run-lancet-as-a-server) under LlamaStash.
 - `classifier`: a [decision model](#stage-2-decision-models-kev-laya-jev) that answers one yes/no question, "is this command risky?", with a probability: Kev or Laya on a local llama.cpp server, or Jev through Pi.
@@ -380,6 +380,30 @@ Describe both answers with `yes` and `no`. I only tested extra questions on Laya
 
 For a local server, `classifier.model` is part of the model name the server must report. If the server runs something else, every classified command gets a prompt. That way a swapped model can't quietly answer questions and a threshold that were tuned for another one. With `classifier.provider` set, `classifier.model` is the model id in Pi.
 
+### Conversation context
+
+A decision model that sees only the command can't tell `kubectl rollout restart deployment/api` that you asked for from the same command you didn't. `classifier.context` sends the conversation with each command and adds two questions:
+
+- `approved` (yes/no): did you, in your own messages, ask for or approve this exact action on this exact target?
+- `decision` (allow / ask / block): may the call run without asking you? Its risk is the chance of ask or block. Not asked through a Pi `provider`.
+
+A call asks when `decision` is at or above `stopAbove` (0.5). Otherwise it runs when `risky` is below `askAbove`, or when `approved` is at or above `approvedAbove` (0.9).
+
+```json
+"classifier": {
+  "context": { "enabled": true, "approvedAbove": 0.9, "stopAbove": 0.5 }
+}
+```
+
+`approved` alone is not enough: on a 130-call suite, Mica v0.5 4B answered yes to calls next to what you approved (prod when you said staging, every table when you said one) and let 4 more dangerous calls run than with no context. With `decision` and `approvedAbove` 0.9 it let none run that the command-only setup caught, and asked about 3 of 52 approved calls instead of 14.
+
+- The conversation is your messages plus the agent's earlier tool calls, with the call under review last as `ACTION`. Tool output and the agent's text are not sent, so an "approval" in a file, a web page or the agent's own words can't reach the model. Skill bodies and `@file` attachments are cut from your messages, as for stage 3.
+- Extra questions still ask at their own thresholds. Nothing is blocked: a `block` answer only asks you.
+- `maxChars` (16000), `maxEntries` (40), `userMessageChars` (4000) and `toolInputChars` (1000) cap the size. The call itself is never cut; older tool lines go before your messages do. The model server's context must hold it: about 5k tokens at the defaults.
+- It adds two questions per call: about 300 ms per call with Mica on an RTX 3060 instead of 80. The prompt and the log show the answers.
+- With `provider` set, your messages go to that provider with every classified call.
+- The `command` decider (LANCET) takes no conversation; `context` does not apply to it.
+
 ### Sample configs
 
 These are the setups I tested. Each one has the `config.json` and the server definition that goes with it. The samples spell out every `classifier` key they use, including the ones left at their default:
@@ -397,6 +421,7 @@ These are the setups I tested. Each one has the `config.json` and the server def
 | `risky`, `safe` | Descriptions of the yes and no answers. Not used when `levels` is set |
 | `levels` | When set, the main question is a graded score over these levels |
 | `extraQuestions` | More yes/no questions, each with its own optional `askAbove` |
+| `context` | Send your messages with each command and skip the prompt for a call you approved; see [Conversation context](#conversation-context) (off) |
 
 The other keys (`enabled`, `withoutUi`, `log`, `rules`, `allowedPaths`, `guardedPaths`) work the same with every model, so the samples leave them out.
 
