@@ -129,6 +129,9 @@ export interface Scope {
   // With the chat decider, running a file the session wrote or edited goes to it instead of being
   // allowed. Otherwise writing code to a file and running it would skip the decider.
   chatDecider?: boolean;
+  // The deciders read scripts: running a file the session wrote or edited, a file of the project, or
+  // one outside it goes to them with the file named in `files` instead of being allowed or judged by name.
+  checkScripts?: boolean;
   // Shell variables the command set to a known path before this point.
   vars?: Map<string, string>;
 }
@@ -144,6 +147,7 @@ export interface ScopeOptions {
   files?: SessionFiles;
   project?: (p: string) => boolean;
   chatDecider?: boolean;
+  checkScripts?: boolean;
 }
 
 export function makeScope(cwd: string, guarded: string[], options: ScopeOptions = {}): Scope {
@@ -160,6 +164,7 @@ export function makeScope(cwd: string, guarded: string[], options: ScopeOptions 
     pending: new Map(),
     project: options.project,
     chatDecider: options.chatDecider,
+    checkScripts: options.checkScripts,
   };
 }
 
@@ -286,13 +291,13 @@ function runFile(word: string, args: string[], scope: Scope): Verdict | undefine
   if (!p) return undefined;
   const origin = originOf(p, scope);
   if (origin === "fetched") return criticalAsk(`runs a file downloaded in this session: ${word}`);
-  if (isGuarded(p, scope) || !isLocal(p, scope) || OUTWARD_WORDS.test([path.basename(word), ...args].join(" "))) return undefined;
-  if (origin === "authored") {
-    if (!scope.chatDecider) return ALLOW;
-    // A file written by this same command is in the command itself.
-    return { ...classify(`runs ${word}, which this session wrote`), files: scope.pending.has(p) ? [] : [p] };
-  }
-  return origin === undefined && scope.project?.(p) ? ALLOW : undefined;
+  // A file written by this same command is in the command itself.
+  const withFile = (reason: string): Verdict => ({ ...classify(reason), files: scope.pending.has(p) ? [] : [p] });
+  if (isGuarded(p, scope)) return undefined;
+  if (!isLocal(p, scope) || OUTWARD_WORDS.test([path.basename(word), ...args].join(" "))) return scope.checkScripts ? withFile(`runs ${word}`) : undefined;
+  if (origin === "authored") return scope.chatDecider || scope.checkScripts ? withFile(`runs ${word}, which this session wrote`) : ALLOW;
+  if (origin === undefined && scope.project?.(p)) return scope.checkScripts ? withFile(`runs ${word}, a file of the project`) : ALLOW;
+  return scope.checkScripts ? withFile(`runs ${word}`) : undefined;
 }
 
 // ---- credentials ----
@@ -1189,7 +1194,7 @@ export function fileVerdict(tool: string, target: string, scope: Scope): Verdict
   // The write tool replaces the whole file with the agent's text; an edit keeps the file's origin.
   // For the chat decider an edit makes a file of no known origin one the session wrote, so a
   // project script the agent changed goes to it when run.
-  if (tool === "write" || (scope.chatDecider && p && originOf(p, scope) === undefined)) note(p, "authored", scope);
+  if (tool === "write" || ((scope.chatDecider || scope.checkScripts) && p && originOf(p, scope) === undefined)) note(p, "authored", scope);
   return isLocal(p, scope) ? ALLOW : forDecider(outside(`${tool} outside the working directory: ${target}`, p), scope);
 }
 

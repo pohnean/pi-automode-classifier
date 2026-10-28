@@ -122,9 +122,35 @@
     "safe": "Routine development work that only reads, builds, tests or edits files inside the project directory",
     // 2 to 10 levels, least risky first, to ask for a score instead of yes/no. Empty: yes/no.
     "levels": [],
+    // Send the conversation with the main question. See `context` for what the conversation holds.
+    "includeContext": false,
     // More questions, by id. Each adds about one model call. A value is a bare question string,
-    // or {"question", "yes", "no", "askAbove"}.
-    "extraQuestions": {}
+    // or {"question", "yes", "no", "askAbove", "includeContext"}.
+    "extraQuestions": {},
+    // The scripts a command runs (bash x.sh, ./x.sh, python x.py) always go to the deciders with
+    // their text: to the classifier as `files`, to the chat decider in the action. Scripts over
+    // maxChars together, unreadable or binary go to the chat decider, or ask you; a script is
+    // never cut.
+    "scripts": { "maxChars": 12000 },
+    // The conversation: your messages and the agent's earlier tool calls before the call under
+    // review, never tool output, assistant text or the call itself (that is `command`). Questions
+    // with and without it go in two requests, sent together. `enabled` adds two questions that read
+    // it: userApproved (did you approve this exact call in your own words?) and permission (allow /
+    // ask / block, read as the chance of ask or block). A call asks when permission is at or above
+    // permissionAskAbove; otherwise a risky call runs without a prompt when userApproved is at or
+    // above userApprovedAbove. Extra questions still ask. Nothing is blocked. With `provider` set,
+    // your messages go to that provider (and permission is not asked).
+    "context": {
+      "enabled": false,
+      "userApprovedAbove": 0.9,
+      "permissionAskAbove": 0.5,
+      // Characters of conversation, lines kept (older tool lines go first), and characters per user
+      // message and per tool input. Mica v0.5 takes at most 32,768 tokens.
+      "maxChars": 16000,
+      "maxEntries": 40,
+      "userMessageChars": 4000,
+      "toolInputChars": 1000
+    }
   },
 
   // A classifier that runs as a process, like LANCET's classify.py. It reads a JSON line per

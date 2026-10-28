@@ -75,7 +75,7 @@ The working directory is the directory Pi runs in, plus the git checkout it belo
 
 A classifier scores each call the rules leave open, from 0 to 1. A score at or above `askAbove` asks you. With stage 3 after it, a score below `allowBelow` runs, and a score in between goes to stage 3. Without stage 3, every score below `askAbove` runs. A classifier never blocks anything by itself.
 
-It sees only the command. So the rules' ask verdicts, and scripts the agent wrote in this session, skip it: they go to stage 3, or ask you when there is no stage 3.
+By default it sees only the command. With [`classifier.context`](#conversation-context) on it also reads your messages, so a risky call you approved in your own words runs without a prompt. It also always reads the scripts a command runs ([Scripts](#scripts)). The rules' ask verdicts go to stage 3, or ask you when there is no stage 3.
 
 - `command`: a classifier that runs as a process, like [LANCET](#stage-2-lancet) on CPU, or LANCET [as a server](#run-lancet-as-a-server) under LlamaStash.
 - `classifier`: a [decision model](#stage-2-decision-models-kev-laya-jev) that answers one yes/no question, "is this command risky?", with a probability: Kev or Laya on a local llama.cpp server, or Jev through Pi.
@@ -380,6 +380,52 @@ Describe both answers with `yes` and `no`. I only tested extra questions on Laya
 
 For a local server, `classifier.model` is part of the model name the server must report. If the server runs something else, every classified command gets a prompt. That way a swapped model can't quietly answer questions and a threshold that were tuned for another one. With `classifier.provider` set, `classifier.model` is the model id in Pi.
 
+### Conversation context
+
+A decision model that sees only the command can't tell `kubectl rollout restart deployment/api` that you asked for from the same command you didn't. The conversation fixes that: your messages and the agent's earlier tool calls before the call under review. Tool output, the agent's text and the call itself are not in it; the call is `command`, sent once. Skill bodies and `@file` attachments are cut from your messages, as for stage 3.
+
+Each question chooses whether it reads the conversation: `classifier.includeContext` for the main question, `includeContext` on each extra question. A System One request has one state for all its questions, so questions with and without the conversation go in two requests, sent together.
+
+`classifier.context.enabled` adds two built-in questions that always read it:
+
+- `userApproved` (yes/no): did you, in your own messages, ask for or approve this exact action on this exact target?
+- `permission` (allow / ask / block): may the call run without asking you? Its risk is the chance of ask or block. Not asked through a Pi `provider`.
+
+A call asks when `permission` is at or above `permissionAskAbove` (0.5). Otherwise it runs when `risky` is below `askAbove`, or when `userApproved` is at or above `userApprovedAbove` (0.9).
+
+```json
+"classifier": {
+  "includeContext": false,
+  "context": { "enabled": true, "userApprovedAbove": 0.9, "permissionAskAbove": 0.5 }
+}
+```
+
+`userApproved` alone is not enough: on a 130-call suite, Mica v0.5 4B answered yes to calls next to what you approved (prod when you said staging, every table when you said one) and let 4 more dangerous calls run than with no context. `permission` vetoes most of those. Seeing the conversation also lowered the main question's risk for a prod migration after a staging one, which is why `includeContext` is off for it by default.
+
+- Extra questions still ask at their own thresholds. Nothing is blocked: a `block` answer only asks you.
+- `maxChars` (16000), `maxEntries` (40 lines), `userMessageChars` (4000) and `toolInputChars` (1000) cap the size. Older tool lines go before your messages do. The model server's context must hold it plus the command: about 5k tokens at the defaults.
+- The prompt and the log show the answers.
+- With `provider` set, your messages go to that provider with every classified call.
+- The `command` decider (LANCET) takes no conversation.
+
+### Scripts
+
+A command like `bash backup.sh` says nothing about what `backup.sh` does. The extension always reads the scripts a command runs and sends their text with it: to the classifier as `files`, and to the chat decider in the action, as it already did for scripts the agent wrote:
+
+```json
+"state": { "tool": "bash", "cwd": "/home/me/project", "command": "bash backup.sh",
+           "files": "<file name=\"backup.sh\">\npg_dump ...\npsql \"$PROD_DB_URL\" -c \"DROP DATABASE app_archive;\"\n</file>" }
+```
+
+- Scripts the agent wrote or edited in this session, files of the project checkout such as `./scripts/test.sh`, and scripts outside the project, run as `bash x.sh`, `./x.sh` or `python x.py`. Without this a script the agent wrote ran unchecked when there was no chat decider, and a project script ran unchecked with any decider.
+- A script written and run in one command (`cat > x.sh <<EOF … EOF; bash x.sh`) is already in the command, so it goes to the classifier with no `files`.
+- A script goes through the deciders in `decider` order like any other call. The process classifier (`command`) takes no files and is skipped.
+- Scripts are never cut, since what matters can be at the end. Over `maxChars` (12000) together, unreadable, or binary: the chat decider judges it, or you get a prompt.
+- They are read when the call is checked. "Allow for this session" covers that text only: a script changed since then asks again.
+- Not read: Makefile targets and `npm run` scripts, and scripts a script calls.
+
+On the 130-call suite with Mica v0.5 4B the rules plus classifier let 2 dangerous calls run without this (a backup script with prod `TRUNCATE`/`DROP` at its end, a backfill script aimed at prod) and none with it.
+
 ### Sample configs
 
 These are the setups I tested. Each one has the `config.json` and the server definition that goes with it. The samples spell out every `classifier` key they use, including the ones left at their default:
@@ -396,7 +442,10 @@ These are the setups I tested. Each one has the `config.json` and the server def
 | `question` | The main question |
 | `risky`, `safe` | Descriptions of the yes and no answers. Not used when `levels` is set |
 | `levels` | When set, the main question is a graded score over these levels |
-| `extraQuestions` | More yes/no questions, each with its own optional `askAbove` |
+| `extraQuestions` | More yes/no questions, each with its own optional `askAbove` and `includeContext` |
+| `includeContext` | Send the conversation with the main question (false); extra questions take their own `includeContext` |
+| `scripts` | `maxChars`: the most script text sent with a command (12000); see [Scripts](#scripts) |
+| `context` | Conversation size, and `enabled` for the built-in `userApproved` and `permission` questions; see [Conversation context](#conversation-context) (off) |
 
 The other keys (`enabled`, `withoutUi`, `log`, `rules`, `allowedPaths`, `guardedPaths`) work the same with every model, so the samples leave them out.
 
