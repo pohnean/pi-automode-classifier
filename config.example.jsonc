@@ -140,7 +140,7 @@
       "userApprovedAbove": 0.9,
       "permissionAskAbove": 0.5,
       // Characters of conversation, lines kept (older tool lines go first), and characters per user
-      // message and per tool input. Mica's service takes 12k tokens.
+      // message and per tool input. Mica v0.5 takes at most 32,768 tokens.
       "maxChars": 16000,
       "maxEntries": 40,
       "userMessageChars": 4000,
