@@ -1,6 +1,6 @@
 # pi-automode-classifier
 
-An auto mode plugin for the [Pi](https://pi.dev) coding agent, in the style of [Claude Code's auto mode](https://www.anthropic.com/engineering/claude-code-auto-mode). It decides for each tool call whether the call runs, asks you, or is blocked. It does that in up to three stages. Each stage settles the calls it is sure about and passes the rest on:
+An auto mode plugin for the [oh-my-pi](https://github.com/can1357/oh-my-pi) (omp) coding agent, in the style of [Claude Code's auto mode](https://www.anthropic.com/engineering/claude-code-auto-mode). It decides for each tool call whether the call runs, asks you, or is blocked. It does that in up to three stages. Each stage settles the calls it is sure about and passes the rest on:
 
 | Stage | What judges the call | What it sees | Time per call |
 | --- | --- | --- | --- |
@@ -10,19 +10,25 @@ An auto mode plugin for the [Pi](https://pi.dev) coding agent, in the style of [
 
 The rules settle most calls. The default uses stages 1 and 3 and needs no setup, because stage 3 is the model the session already runs. Stage 2 is a small model on your CPU, or a hosted one. Alone, it takes the place of the chat model. In front of it, the classifier runs the calls it scores low, asks you about the ones it scores high, and passes the unclear ones on, so the chat model judges far fewer calls. In four of my own Pi sessions, all three stages asked me about 4 of the 258 calls I let run, against 19 with LANCET alone, and called the chat model 17 times instead of 42. [Using all three stages](#using-all-three-stages) has the setup and the numbers.
 
-I built it because Pi runs every tool call without asking for approval, and I wanted something like Claude Code's auto mode. With a local model in stage 3, or only Kev, Laya or LANCET in stage 2, nothing leaves your machine. With a hosted model the decider's prompt and your messages go to that provider.
+It was built for Pi, which runs every tool call without asking for approval; this fork targets omp, whose default approval mode (`yolo`) does the same. The original author built it and I wanted something like Claude Code's auto mode. With a local model in stage 3, or only Kev, Laya or LANCET in stage 2, nothing leaves your machine. With a hosted model the decider's prompt and your messages go to that provider.
 
-It is not a sandbox. It guards the agent's tool calls. It doesn't guard `!` commands you type, and extensions run with your user's permissions. Read [Pi's security docs](https://pi.dev/docs/latest/security) for real isolation.
+It is not a sandbox. It guards the agent's tool calls, subagents' included. It doesn't guard `!` commands you type, and extensions run with your user's permissions.
 
 ## Install
 
 ```bash
-pi install npm:pi-automode-classifier
-# or straight from GitHub
-pi install git:github.com/deepu105/pi-automode-classifier
+omp plugin install git:github.com/pohnean/pi-automode-classifier
+# or from a checkout, linked so edits apply at the next session
+omp plugin link ./pi-automode-classifier
 ```
 
-Or from a checkout: `pi install ./pi-automode-classifier`.
+omp gives each `tool_call` handler 30 seconds and blocks the call when that runs out, before this extension can ask you or log anything. The chat decider's reasoning pass can take longer, so raise it:
+
+```bash
+omp config set extensionHandlers.toolCallTimeoutMs 150000
+```
+
+Time spent in the prompt does not count against it.
 
 That is all the default needs: stages 1 and 3, with the session's own model as stage 3. See [stage 3](#stage-3-the-chat-decider) for what that costs, [Using all three stages](#using-all-three-stages) to add a classifier, and [Configuration](#configuration) for every key.
 
@@ -134,15 +140,15 @@ A command that reads a credential file asks, also a read-only one like `cat ~/.a
 
 An `allow` rule in your config replaces the ask, for example `"cat ~/.npmrc"`.
 
-### Pi's own files
+### omp's own files
 
-Changes to Pi's own configuration, instructions and code ask you, also inside the project and with the chat decider, because they change what later sessions do:
+Changes to omp's own configuration, instructions and code ask you, also inside the project and with the chat decider, because they change what later sessions do:
 
-- **Pi's agent directory** (`~/.pi/agent`, or `PI_CODING_AGENT_DIR`) and any `.pi` folder, such as a project's `.pi/settings.json`, `.pi/extensions/` or `.pi/APPEND_SYSTEM.md`, or a dotfiles copy of `~/.pi/agent`.
+- **omp's agent directory** (`~/.omp/agent`, or `PI_CODING_AGENT_DIR`) and any `.omp` or `.pi` folder, such as a project's `.omp/config.yml` or `.omp/extensions/`.
 - **Context files** in any directory: `AGENTS.md`, `AGENTS.override.md`, `AGENTS.MD`, `CLAUDE.md` and `CLAUDE.MD`.
-- **`pi install`, `pi remove`, `pi update` and `pi config`.**
+- **`omp install`, `omp plugin`, `omp config`, `omp update` and `omp setup`** (and Pi's `pi install`, `pi remove`, `pi update`, `pi config`).
 
-Reading them is fine. For the `write` and `edit` tools, `Allow for this session` covers that one file. For a command, an `allow` rule replaces the ask, for example `"pi install npm:pi-subagents"`. Without a UI these follow `withoutUi.onAsk`. Pi's `settings.json` and this extension's files are stricter: they always ask, no rule opens them, and they are blocked without a UI.
+Reading them is fine. For the `write` and `edit` tools, `Allow for this session` covers that one file. For a command, an `allow` rule replaces the ask, for example `"omp plugin install *"`. Without a UI these follow `withoutUi.onAsk`. omp's `config.yml` (where the approval mode and this extension's timeout live), `~/.omp/plugins` and this extension's own files are stricter: they always ask, no rule opens them, and they are blocked without a UI.
 
 ## Using all three stages
 
@@ -760,7 +766,7 @@ The environment slots are what stop the internal-infrastructure false positives:
 
 ## Configuration
 
-Optional, in `~/.pi/agent/extensions/pi-automode-classifier/config.json`. A config with an error is ignored as a whole and you get a warning, so a typo can't half-apply. [`config.example.jsonc`](config.example.jsonc) lists every key at its default, with a comment for each. The config file itself is plain JSON, so drop the comments and keep only the keys you change.
+Optional, in `~/.omp/agent/pi-automode-classifier/config.json`. A config with an error is ignored as a whole and you get a warning, so a typo can't half-apply. [`config.example.jsonc`](config.example.jsonc) lists every key at its default, with a comment for each. The config file itself is plain JSON, so drop the comments and keep only the keys you change.
 
 | Key | Default | What it does |
 | --- | --- | --- |
@@ -777,6 +783,33 @@ Optional, in `~/.pi/agent/extensions/pi-automode-classifier/config.json`. A conf
 | `command` | none | The [classifier process](#stage-2-lancet): `argv`, `timeoutMs` (5000), `askAbove` (0.2) and `allowBelow` (0.1) |
 
 The decision log holds full commands, so treat it like shell history.
+
+### The decision log
+
+One JSON line per decision in `~/.local/state/pi-automode-classifier/decisions.jsonl`. Only this extension writes it; nothing goes to omp's logs or the session.
+
+| Field | What it holds |
+| --- | --- |
+| `tool`, `cwd`, `subject` | The call: the command, the files changed, or the tool's input |
+| `agent` | The subagent that made the call, when it was not the main agent |
+| `rule`, `reason` | What the rules said: `allow`, `deny`, `ask` or `classify`, and why |
+| `steps` | Each classifier asked: its model, its answers (`risky`, and with context `userApproved` and `permission`) and the time |
+| `handoff` | Why the call went on to the next decider: the classifier's score and the thresholds it fell between (`allowBelow`, `askAbove`, and with context `userApprovedAbove`, `permissionAskAbove`), a classifier error, or a rule ask that goes straight to the chat decider |
+| `llm` | The chat decider: `params` (thinking level, token budgets, timeout, context window, transcript size) and `passes`, one per call to the model, with its stage, thinking level, time, tokens, the model's answer and its reasoning text |
+| `llmCategory`, `llmReason`, `llmError` | The chat decider's block category and reason, or why it gave no answer |
+| `outcome`, `by` | `allow`, `ask` or `block`, and who decided: `rule`, a classifier, `llm`, `session`, `user`, `no-ui`. A prompt is logged when it is shown (`ask`, `prompt`) and again with your answer; `cancelled` marks one you dismissed |
+
+### Tools in omp
+
+| Tool | Check |
+| --- | --- |
+| `bash` | The rules, in the call's own `cwd` |
+| `write`, `edit`, `ast_edit` | The rules, for every file the call changes (a hashline edit's files come from its headers). A write to an `xd://` device is checked as the device's own call |
+| `read`, `grep` | Credential files only; a `read` of an http(s) URL goes to the deciders |
+| `eval` | The deciders, with the code |
+| `github` | Read-only operations run; the rest go to the deciders |
+| `safeTools` | Run unchecked |
+| anything else (MCP, `web_search`, `debug`, other extensions' tools) | The deciders, with the tool name and its input |
 
 ### Your own rules
 
