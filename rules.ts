@@ -129,11 +129,9 @@ export interface Scope {
   // With the chat decider, running a file the session wrote or edited goes to it instead of being
   // allowed. Otherwise writing code to a file and running it would skip the decider.
   chatDecider?: boolean;
-  // The deciders read scripts: running a file the session wrote or edited, or one outside the
-  // project, goes to them with the file named in `files` instead of being allowed or judged by name.
+  // The deciders read scripts: running a file the session wrote or edited, a file of the project, or
+  // one outside it goes to them with the file named in `files` instead of being allowed or judged by name.
   checkScripts?: boolean;
-  // With checkScripts, files of the project checkout go to the classifier too.
-  checkProjectScripts?: boolean;
   // Shell variables the command set to a known path before this point.
   vars?: Map<string, string>;
 }
@@ -150,7 +148,6 @@ export interface ScopeOptions {
   project?: (p: string) => boolean;
   chatDecider?: boolean;
   checkScripts?: boolean;
-  checkProjectScripts?: boolean;
 }
 
 export function makeScope(cwd: string, guarded: string[], options: ScopeOptions = {}): Scope {
@@ -168,7 +165,6 @@ export function makeScope(cwd: string, guarded: string[], options: ScopeOptions 
     project: options.project,
     chatDecider: options.chatDecider,
     checkScripts: options.checkScripts,
-    checkProjectScripts: options.checkProjectScripts,
   };
 }
 
@@ -300,7 +296,7 @@ function runFile(word: string, args: string[], scope: Scope): Verdict | undefine
   if (isGuarded(p, scope)) return undefined;
   if (!isLocal(p, scope) || OUTWARD_WORDS.test([path.basename(word), ...args].join(" "))) return scope.checkScripts ? withFile(`runs ${word}`) : undefined;
   if (origin === "authored") return scope.chatDecider || scope.checkScripts ? withFile(`runs ${word}, which this session wrote`) : ALLOW;
-  if (origin === undefined && scope.project?.(p)) return scope.checkScripts && scope.checkProjectScripts ? withFile(`runs ${word}, a file of the project`) : ALLOW;
+  if (origin === undefined && scope.project?.(p)) return scope.checkScripts ? withFile(`runs ${word}, a file of the project`) : ALLOW;
   return scope.checkScripts ? withFile(`runs ${word}`) : undefined;
 }
 

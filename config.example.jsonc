@@ -127,16 +127,11 @@
     // More questions, by id. Each adds about one model call. A value is a bare question string,
     // or {"question", "yes", "no", "askAbove", "includeContext"}.
     "extraQuestions": {},
-    // Read the scripts a command runs (bash x.sh, ./x.sh, python x.py) and send them with it, instead
-    // of allowing a script or judging one by its name: to the classifier as `files`, to the chat
-    // decider in the action. Scripts the classifier cannot take whole (over maxChars together,
-    // unreadable, binary) go to the chat decider, or ask you; a script is never cut.
-    "scripts": {
-      "enabled": true,
-      // Also files already in the project checkout, such as ./scripts/test.sh.
-      "project": true,
-      "maxChars": 12000
-    },
+    // The scripts a command runs (bash x.sh, ./x.sh, python x.py) always go to the deciders with
+    // their text: to the classifier as `files`, to the chat decider in the action. Scripts over
+    // maxChars together, unreadable or binary go to the chat decider, or ask you; a script is
+    // never cut.
+    "scripts": { "maxChars": 12000 },
     // The conversation: your messages and the agent's earlier tool calls before the call under
     // review, never tool output, assistant text or the call itself (that is `command`). Questions
     // with and without it go in two requests, sent together. `enabled` adds two questions that read

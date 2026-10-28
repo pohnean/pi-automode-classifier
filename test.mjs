@@ -1306,14 +1306,13 @@ bash("ask", "systemctl --user import-environment QT_QPA_PLATFORMTHEME");
     const ranBig = !(await both.tool("bash", { command: "bash big.sh" }, { cwd: dir }))?.block;
     check("x", { action: ranBig && bodies.length === m && both.sent.length > 0 && JSON.stringify(both.sent).includes("echo hi") ? "x" : JSON.stringify({ ranBig, mica: bodies.length - m, sent: both.sent.length }) }, "scripts + chat decider: a script over maxChars goes to the chat decider with its text");
   }
-  // A file of the project checkout goes to the classifier too, unless scripts.project is off.
-  const proj = (checkProjectScripts) => makeScope(dir, [], { project: (p) => p.startsWith(dir), checkScripts: true, checkProjectScripts });
+  // A file of the project checkout goes to the classifier too.
+  const proj = () => makeScope(dir, [], { project: (p) => p.startsWith(dir), checkScripts: true });
   fs.mkdirSync(path.join(dir, "scripts"));
   fs.writeFileSync(path.join(dir, "scripts/t.sh"), "make test\n");
-  const v = bashVerdict("./scripts/t.sh", proj(true));
+  const v = bashVerdict("./scripts/t.sh", proj());
   check("x", { action: v.action === "classify" && v.files?.[0] === path.join(dir, "scripts/t.sh") ? "x" : JSON.stringify(v) }, "scripts: a project script goes to the classifier with its file");
-  check("allow", bashVerdict("./scripts/t.sh", proj(false)), "scripts: with scripts.project off, a project script runs as before");
-  check("allow", bashVerdict("./scripts/t.sh", makeScope(dir, [], { project: (p) => p.startsWith(dir) })), "scripts: without checkScripts, the rules are unchanged");
+  check("allow", bashVerdict("./scripts/t.sh", makeScope(dir, [], { project: (p) => p.startsWith(dir) })), "scripts: with no decider to read it (rules only), a project script runs as before");
   fs.rmSync(dir, { recursive: true });
   server.close();
 }

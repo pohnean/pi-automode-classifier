@@ -100,18 +100,14 @@ export interface ClassifierConfig {
   // earlier tool calls, never tool output or assistant text; the call itself is `command`. With
   // `provider` set, your messages go there.
   context: ClassifierContext;
-  // Read the scripts a command runs and send them with it as `files`, instead of allowing a script
-  // the session wrote or judging a script by its name. Only with the classifier decider and no
-  // chat decider (the chat decider reads them already).
+  // The scripts a command runs always go to the deciders with their text (the classifier gets them
+  // as `files`). Scripts the classifier cannot take whole go to the chat decider, or ask you.
   scripts: ClassifierScripts;
 }
 
 export interface ClassifierScripts {
-  enabled: boolean;
-  // Also files of the project checkout, such as ./scripts/test.sh. Off: those run unchecked.
-  project: boolean;
-  // Scripts longer than this together, unreadable ones and binaries ask you: a script is never cut,
-  // since what matters can be at its end.
+  // Scripts longer than this together, unreadable ones and binaries are not sent to the
+  // classifier: a script is never cut, since what matters can be at its end.
   maxChars: number;
 }
 
@@ -186,7 +182,7 @@ export const DEFAULTS: Config = {
     levels: [],
     includeContext: false,
     extraQuestions: {},
-    scripts: { enabled: true, project: true, maxChars: 12000 },
+    scripts: { maxChars: 12000 },
     context: { enabled: false, userApprovedAbove: 0.9, permissionAskAbove: 0.5, maxChars: 16000, maxEntries: 40, userMessageChars: 4000, toolInputChars: 1000 },
   },
   llm: DEFAULT_LLM,
@@ -244,7 +240,7 @@ const SCHEMA: Schema = {
     levels: (v) => isStrings(v) && (v as string[]).length !== 1 && (v as string[]).length <= 10,
     includeContext: isBool,
     extraQuestions: (v) => isObject(v) && Object.entries(v).every(([id, q]) => !["risky", "userApproved", "permission"].includes(id) && isQuestion(q)),
-    scripts: { enabled: isBool, project: isBool, maxChars: atLeast(1) },
+    scripts: { maxChars: atLeast(1) },
     context: {
       enabled: isBool,
       userApprovedAbove: isThreshold,
@@ -1136,8 +1132,8 @@ export default function (pi: ExtensionAPI, overrides: Partial<Config> = {}) {
       files,
       project: (p) => inCheckout(p, roots),
       chatDecider: config.decider.includes("llm"),
-      checkScripts: config.classifier.scripts.enabled && config.decider.some((d) => d === "classifier" || d === "llm"),
-      checkProjectScripts: config.classifier.scripts.project,
+      // With nothing to judge a script, the rules decide as before.
+      checkScripts: config.decider.some((d) => d === "classifier" || d === "llm"),
     });
     let subject: string;
     let verdict: Verdict;
