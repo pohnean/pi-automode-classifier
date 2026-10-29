@@ -241,7 +241,7 @@ const isGuarded = (p: string | undefined, scope: Scope) => !!p && scope.guarded.
 // in every directory. A change to them changes what later sessions do, so it asks you, also with
 // the chat decider. Your own allow rules can replace that ask.
 const CONTEXT_FILES = new Set(["AGENTS.md", "AGENTS.override.md", "AGENTS.MD", "CLAUDE.md", "CLAUDE.MD"]);
-const isPiFile = (p: string | undefined, scope: Scope) => !!p && (p.split("/").includes(".pi") || CONTEXT_FILES.has(path.basename(p)) || scope.piDirs.some((d) => within(p, d)));
+const isPiFile = (p: string | undefined, scope: Scope) => !!p && ((p.split("/").includes(".pi") || p.split("/").includes(".omp")) || CONTEXT_FILES.has(path.basename(p)) || scope.piDirs.some((d) => within(p, d)));
 const piAsk = (reason: string): Verdict => ({ action: "ask", reason, firm: true });
 const inTmp = (p: string) => TMP_DIRS.some((d) => within(p, d, true));
 // Provably inside the project or a temp directory.
@@ -1014,6 +1014,8 @@ function command(cmd: Simple, scope: Scope, depth: number): Verdict {
   if (secret) verdict = worst(verdict, criticalAsk(`${name} reads a credential file: ${secret}`));
   // Pi's package commands change its settings and what code every session loads.
   if (name === "pi" && ["install", "remove", "uninstall", "update", "config"].includes(args[0])) verdict = worst(verdict, piAsk(`pi ${args[0]} changes Pi's own setup`));
+  // omp's equivalents: plugins, settings (the approval mode, this extension's timeout) and the agent itself.
+  if (name === "omp" && ["install", "plugin", "config", "update", "setup"].includes(args[0])) verdict = worst(verdict, piAsk(`omp ${args[0]} changes omp's own setup`));
   // A program in a temp directory, or one this session wrote or downloaded, is not the tool its
   // name says: /tmp/file is not file(1).
   if (argv[0].includes("/")) {

@@ -1,15 +1,15 @@
 {
   "name": "pi-automode-classifier",
   "version": "0.3.0",
-  "description": "Auto mode for Pi: deterministic rules first, then a local decision model, then a confirm prompt",
+  "description": "Auto mode for oh-my-pi (omp): deterministic rules first, then a local decision model, then a chat-model judge, then a confirm prompt",
   "keywords": [
-    "pi-package",
-    "pi-extension",
     "auto-mode",
     "guardrails",
     "permissions",
     "decision-model",
-    "llama.cpp"
+    "llama.cpp",
+    "omp-plugin",
+    "omp-extension"
   ],
   "license": "MIT",
   "author": "Deepu K Sasidharan",
@@ -39,9 +39,9 @@
     "bench:llm": "node bench-llm.mjs"
   },
   "peerDependencies": {
-    "@earendil-works/pi-coding-agent": "*"
+    "@oh-my-pi/pi-coding-agent": "*"
   },
-  "pi": {
+  "omp": {
     "extensions": [
       "./index.ts"
     ]

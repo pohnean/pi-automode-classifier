@@ -37,15 +37,17 @@ import { createHash } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { bashVerdict, commitWrites, compileRules, fileVerdict, isRootLike, makeScope, readVerdict, within, type Action, type SessionFiles, type Verdict } from "./rules.ts";
 import { buildSystemPrompt, buildTranscript, denyMessage, mergeRules, parseVerdict, STAGE1_INSTRUCTION, stage2Instruction, DEFAULT_RULES, DEFAULT_LLM, type LlmConfig, type Outcome, type TranscriptItem } from "./automode.ts";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const HOME = os.homedir();
-const AGENT_DIR = process.env.PI_CODING_AGENT_DIR ?? path.join(HOME, ".pi/agent");
+// omp's agent directory; omp reads the same variable.
+const AGENT_DIR = process.env.PI_CODING_AGENT_DIR ?? path.join(HOME, ".omp/agent");
 // User config lives outside the package so a package update does not overwrite it.
-export const CONFIG_FILE = path.join(AGENT_DIR, "extensions/pi-automode-classifier/config.json");
+// Not under extensions/, where omp looks for extensions to load.
+export const CONFIG_FILE = path.join(AGENT_DIR, "pi-automode-classifier/config.json");
 const EXAMPLE_FILE = path.join(HERE, "config.example.jsonc");
 export const LOG_FILE = path.join(process.env.XDG_STATE_HOME ?? path.join(HOME, ".local/state"), "pi-automode-classifier/decisions.jsonl");
 
@@ -138,6 +140,9 @@ export interface Config {
   // More files or directories that count as the guard's own (changes to them always ask),
   // for example the server's unit file. `~` is expanded.
   guardedPaths: string[];
+  // Tools that run without any check. Every other tool the rules have no check for (MCP tools,
+  // browser, python, a read of a URL, ...) goes to the deciders with its name and input.
+  safeTools: string[];
   withoutUi: {
     // What happens to a call that needs a prompt when there is no UI to show it.
     onAsk: "block" | "allow";
@@ -164,6 +169,11 @@ export const DEFAULTS: Config = {
   rules: { deny: [], ask: [], classify: [], allow: [] },
   allowedPaths: [],
   guardedPaths: [],
+  // Read-only or local-only: search, code intelligence, todos, questions to you, and subagents,
+  // whose own tool calls are checked one by one.
+  // omp's read-only and bookkeeping tools. `task` only starts a subagent, whose own calls come
+  // through this guard. `lsp` edits only through rename/code actions inside the project.
+  safeTools: ["grep", "glob", "find", "ast_grep", "lsp", "todo", "ask", "task", "checkpoint", "rewind", "wait", "yield", "think", "goal", "recall", "reflect", "context_notes", "new_context"],
   withoutUi: { onAsk: "block", rules: { allow: [], deny: [] } },
   decider: ["llm"],
   // Of the question designs compared on bench-cases.json, one yes/no question with both answers
@@ -191,7 +201,8 @@ export const DEFAULTS: Config = {
 };
 
 // The guard's own files and Pi's settings: changes to them always ask.
-const GUARDED = [HERE, path.dirname(CONFIG_FILE), path.join(AGENT_DIR, "settings.json")];
+// This extension, its config, and the omp settings and plugins that could turn it off.
+const GUARDED = [HERE, path.dirname(CONFIG_FILE), path.join(AGENT_DIR, "config.yml"), path.join(AGENT_DIR, "settings.json"), path.join(path.dirname(AGENT_DIR), "plugins")];
 
 const isObject = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 const isStrings = (v: unknown) => Array.isArray(v) && v.every((x) => typeof x === "string");
@@ -224,6 +235,7 @@ const SCHEMA: Schema = {
   rules: { deny: isStrings, ask: isStrings, classify: isStrings, allow: isStrings },
   allowedPaths: isStrings,
   guardedPaths: isStrings,
+  safeTools: isStrings,
   withoutUi: { onAsk: oneOf("block", "allow"), rules: { allow: isStrings, deny: isStrings } },
   decider: (v) => isStrings(v) && (v as string[]).every((d) => ["llm", "classifier", "command"].includes(d)) && new Set(v as string[]).size === (v as string[]).length,
   classifier: {
@@ -488,6 +500,41 @@ export interface Registry {
   ): Promise<{ answers?: Record<string, unknown>; stopReason?: string; errorMessage?: string; usage?: { input?: number } }>;
 }
 
+// omp's model registry, seen through the Registry interface: a catalog classifier is answered by
+// pi-ai's native System One client, a provider's own key comes from one of its models. A registry
+// that already has `classify` (bench and test fakes) is used as it is.
+interface OmpRegistry {
+  find(provider: string, id: string): Record<string, unknown> | undefined;
+  getProviderBaseUrl?(provider: string): string | undefined;
+  getProviderModels?(provider: string): Record<string, unknown>[];
+  getApiKey(model: unknown): Promise<string | undefined>;
+}
+export function hostRegistry(registry: unknown): Registry | undefined {
+  const r = registry as (Partial<Registry> & Partial<OmpRegistry>) | undefined;
+  if (!r || typeof r.classify === "function") return r as Registry | undefined;
+  const omp = r as OmpRegistry;
+  return {
+    findOfType: (_type, provider, id) => omp.find(provider, id),
+    getProvider: (provider) => ({ baseUrl: omp.getProviderBaseUrl?.(provider) }),
+    getApiKeyForProvider: async (provider) => {
+      const model = omp.getProviderModels?.(provider)?.[0];
+      return model ? omp.getApiKey(model) : undefined;
+    },
+    async classify(model, context, options) {
+      try {
+        const ai = (await import("@oh-my-pi/pi-ai")) as unknown as {
+          createNativeJudge(model: unknown, connection: { apiKey: string }): { judge(req: unknown, opts: unknown): Promise<{ answers: Record<string, unknown>; usage?: { input?: number } }> };
+        };
+        const apiKey = (await omp.getApiKey(model)) ?? "";
+        const result = await ai.createNativeJudge(model, { apiKey }).judge(context, { signal: options?.signal });
+        return { answers: result.answers, stopReason: "stop", usage: result.usage };
+      } catch (e) {
+        return { stopReason: "error", errorMessage: (e as Error).message };
+      }
+    },
+  };
+}
+
 // Risk per question id, each scaled to 0..1. Undefined when an answer is missing or malformed.
 function readAnswers(config: Config, ids: string[], raw: Record<string, unknown> | undefined): Record<string, number> | undefined {
   const { levels } = config.classifier;
@@ -636,13 +683,15 @@ function askClassifierProcess(config: Config, state: Record<string, string>, sig
 // one built from Pi's SDK in a bench script.
 export interface ChatRegistry {
   find(provider: string, modelId: string): unknown;
-  streamSimple(
+  // omp's registry has no streamSimple (see chatStream) but has getApiKey.
+  getApiKey?(model: unknown): Promise<string | undefined>;
+  streamSimple?(
     model: unknown,
     context: { systemPrompt?: string; messages: { role: string; content: string }[] },
     options?: Record<string, unknown>,
   ): {
     result(): Promise<{
-      content?: { type: string; text?: string }[];
+      content?: { type: string; text?: string; thinking?: string }[];
       stopReason?: string;
       errorMessage?: string;
       usage?: { input?: number; cacheRead?: number; output?: number };
@@ -650,12 +699,26 @@ export interface ChatRegistry {
   };
 }
 
-export type LlmDecision =
+// One call to the chat model, as the decision log shows it.
+export interface LlmPass {
+  stage: string;
+  thinking: string;
+  maxTokens: number;
+  ms: number;
+  tokens?: number;
+  cut?: boolean;
+  error?: string;
+  answer?: string;
+  reasoning?: string;
+}
+
+type LlmOutcome =
   | { block: false; why: string; stage: string; ms: number; tokens?: number }
   | { block: true; category?: string; reason: string; stage: string; ms: number; tokens?: number }
   // `unparsed`: the model answered, but not with a verdict. `lasting`: asking again fails the same
   // way (no such model, or the call does not fit its window).
   | { error: string; unparsed?: boolean; lasting?: boolean; ms: number; tokens?: number };
+export type LlmDecision = LlmOutcome & { passes?: LlmPass[]; transcriptChars?: number; contextWindow?: number };
 
 export const llmName = (llm: LlmConfig, sessionModelId?: string) =>
   llm.name || (llm.provider || llm.model ? [llm.provider, llm.model].filter(Boolean).join("/") : sessionModelId || "session model");
@@ -688,7 +751,7 @@ function resolveModel(registry: ChatRegistry, config: Config, sessionModel?: Rec
   const base = !llm.provider && !llm.model ? sessionModel : registry.find(llm.provider || String(sessionModel?.provider ?? ""), llm.model);
   if (!base) {
     const wanted = llm.provider ? `${llm.provider}/${llm.model}` : llm.model || "the session model";
-    return { model: {}, llm, error: `Pi has no chat model ${wanted}` };
+    return { model: {}, llm, error: `omp has no chat model ${wanted}` };
   }
   const b = base as Record<string, unknown>;
   const model = {
@@ -702,20 +765,41 @@ function resolveModel(registry: ChatRegistry, config: Config, sessionModel?: Rec
 
 const thinks = ({ model }: Resolved) => Boolean(model.reasoning);
 
+// omp's registry does not stream: a one-shot call is pi-ai's completeSimple with the key the
+// registry resolves, as omp's own commit-message and title generators do. A registry that has
+// streamSimple (the bench and test fakes) is used as it is.
+async function chatStream(
+  registry: ChatRegistry,
+  model: Record<string, unknown>,
+  context: Parameters<NonNullable<ChatRegistry["streamSimple"]>>[1],
+  options: Record<string, unknown>,
+): Promise<ReturnType<NonNullable<ChatRegistry["streamSimple"]>>> {
+  if (typeof registry.streamSimple === "function") return registry.streamSimple(model, context, options);
+  const ai = (await import("@oh-my-pi/pi-ai")) as unknown as {
+    completeSimple(model: unknown, context: unknown, options: unknown): Promise<Awaited<ReturnType<ReturnType<NonNullable<ChatRegistry["streamSimple"]>>["result"]>>>;
+  };
+  const apiKey = await registry.getApiKey?.(model);
+  if (!apiKey) throw new Error(`no credentials for ${model.provider}/${model.id}`);
+  const messages = context.messages.map((m) => ({ ...m, timestamp: Date.now() }));
+  const done = ai.completeSimple(model, { ...context, messages }, { ...options, apiKey });
+  return { result: () => done };
+}
+
 async function askOnce(
   registry: ChatRegistry,
   resolved: Resolved,
   system: string,
   message: string,
   opts: { maxTokens: number; thinking: boolean; signal?: AbortSignal },
-): Promise<{ text?: string; cut?: boolean; error?: string; tokens?: number }> {
+): Promise<{ text?: string; thinking?: string; cut?: boolean; error?: string; tokens?: number }> {
   const options: Record<string, unknown> = { maxTokens: opts.maxTokens, temperature: 0 };
   if (opts.thinking && thinks(resolved)) options.reasoning = resolved.llm.thinkingLevel;
+  else options.disableReasoning = true;
   const timeout = AbortSignal.timeout(resolved.llm.timeoutMs);
   const signal = opts.signal ? AbortSignal.any([opts.signal, timeout]) : timeout;
-  let stream: ReturnType<ChatRegistry["streamSimple"]>;
+  let stream: ReturnType<NonNullable<ChatRegistry["streamSimple"]>>;
   try {
-    stream = registry.streamSimple(resolved.model, { systemPrompt: system, messages: [{ role: "user", content: message }] }, { ...options, signal });
+    stream = await chatStream(registry, resolved.model, { systemPrompt: system, messages: [{ role: "user", content: message }] }, { ...options, signal });
   } catch (e) {
     // A model without credentials throws here rather than returning an error message.
     return { error: (e as Error).message };
@@ -738,7 +822,8 @@ async function askOnce(
   const cut = answer.stopReason === "length";
   if (answer.stopReason && answer.stopReason !== "stop" && !cut) return { error: answer.errorMessage ?? `${answer.stopReason} from the model` };
   const u = answer.usage;
-  return { text, cut, tokens: u ? (u.input ?? 0) + (u.cacheRead ?? 0) + (u.output ?? 0) : undefined };
+  const thinking = (answer.content ?? []).filter((c) => c.type === "thinking").map((c) => c.thinking ?? "").join("").trim();
+  return { text, thinking: thinking || undefined, cut, tokens: u ? (u.input ?? 0) + (u.cacheRead ?? 0) + (u.output ?? 0) : undefined };
 }
 
 // Claude Code's pipeline for one action: the transcript plus the action go in one user message,
@@ -750,6 +835,19 @@ export async function decideWithLlm(
   registry?: ChatRegistry,
   sessionModel?: Record<string, unknown>,
 ): Promise<LlmDecision> {
+  const trace: { passes: LlmPass[]; transcriptChars?: number; contextWindow?: number } = { passes: [] };
+  const decision = await decide(config, items, trace, signal, registry, sessionModel);
+  return { ...decision, ...trace };
+}
+
+async function decide(
+  config: Config,
+  items: TranscriptItem[],
+  trace: { passes: LlmPass[]; transcriptChars?: number; contextWindow?: number },
+  signal?: AbortSignal,
+  registry?: ChatRegistry,
+  sessionModel?: Record<string, unknown>,
+): Promise<LlmOutcome> {
   const started = performance.now();
   const ms = () => Math.round(performance.now() - started);
   const llm = config.llm;
@@ -767,8 +865,24 @@ export async function decideWithLlm(
   const actionChars = buildTranscript(items.slice(-1), llm.transcript).length;
   if (actionChars > budget) return { error: `the action is ${actionChars} chars and the model window has room for ${budget}`, lasting: true, ms: ms() };
   const transcript = buildTranscript(items, { ...llm.transcript, maxChars: Math.min(llm.transcript.maxChars, budget - actionChars) });
-  const send = (instruction: string, opts: { maxTokens: number; thinking: boolean }) =>
-    askOnce(registry, resolved, system, `${transcript}\n\n${instruction}`, { ...opts, signal });
+  trace.transcriptChars = transcript.length;
+  trace.contextWindow = window;
+  const send = async (instruction: string, opts: { maxTokens: number; thinking: boolean }) => {
+    const t0 = performance.now();
+    const r = await askOnce(registry, resolved, system, `${transcript}\n\n${instruction}`, { ...opts, signal });
+    trace.passes.push({
+      stage: opts.thinking ? "reasoning" : "fast",
+      thinking: opts.thinking && thinks(resolved) ? llm.thinkingLevel : "off",
+      maxTokens: opts.maxTokens,
+      ms: Math.round(performance.now() - t0),
+      tokens: r.tokens,
+      cut: r.cut || undefined,
+      error: r.error,
+      answer: r.text !== undefined ? clip(r.text, 4000) : undefined,
+      reasoning: r.thinking !== undefined ? clip(r.thinking, 8000) : undefined,
+    });
+    return r;
+  };
 
   let stage = llm.twoStage ? "fast" : "reasoning";
   let tokens = 0;
@@ -891,6 +1005,23 @@ function fileContents(paths: string[]): Record<string, string> {
   );
 }
 
+// A network address. omp's internal schemes (xd://, local://, skill://, pr://) read local or
+// read-only data and are not URLs here.
+const isUrl = (p: string) => /^(https?|ftp|wss?):\/\//i.test(p);
+
+// omp's GitHub tool: the operations it treats as read-only itself (tools/gh.ts).
+const GITHUB_READ_OPS = new Set(["repo_view", "file_read", "search_issues", "search_prs", "search_code", "search_commits", "search_repos", "run_watch"]);
+
+// The files a write, edit or ast_edit call changes. omp adds `path` and `paths` to a hashline
+// edit's input from its [PATH#TAG] headers; ast_edit takes `paths`.
+function targetPaths(input: Record<string, unknown>): string[] {
+  const list = Array.isArray(input.paths) ? input.paths.filter((p): p is string => typeof p === "string") : [];
+  if (typeof input.path === "string" && !list.includes(input.path)) list.unshift(input.path);
+  return list;
+}
+
+const SEVERITY: Record<Action, number> = { allow: 0, classify: 1, ask: 2, deny: 3 };
+
 // The scripts a call runs, for the classifier: each as <file name="...">, the path relative to the
 // working directory. A problem instead when one cannot be read, is binary, or they are too long
 // together; the call then asks, since a cut script could hide its end.
@@ -992,7 +1123,7 @@ export async function classify(config: Config, state: Record<string, string>, si
     // LlamaStash: Pi lists no classifier there, so the request goes to <baseUrl>/systemone with
     // the provider's own key.
     const base = registry?.getProvider?.(provider)?.baseUrl;
-    if (!registry || !base) return { error: `Pi has no classifier model ${provider}/${expected}`, ms: ms() };
+    if (!registry || !base) return { error: `omp has no classifier model ${provider}/${expected}`, ms: ms() };
     const key = await registry.getApiKeyForProvider?.(provider);
     const url = `${base.replace(/\/+$/, "")}/systemone`;
     return merged(requestGroups(config, state, false).map((g) => systemOne(config, url, key ? { Authorization: `Bearer ${key}` } : {}, g, signal, started)), ms);
@@ -1119,12 +1250,14 @@ export default function (pi: ExtensionAPI, overrides: Partial<Config> = {}) {
   pi.on("tool_call", async (event, ctx) => {
     if (!enabled) return undefined;
     const input = event.input as Record<string, unknown>;
-    const now = checkouts(ctx.cwd);
-    if (!repositories.has(ctx.cwd)) repositories.set(ctx.cwd, now);
-    const roots = repositories.get(ctx.cwd)!;
+    // The folder the call runs in: omp's bash takes its own `cwd`.
+    const cwd = event.toolName === "bash" && typeof input.cwd === "string" && input.cwd ? path.resolve(ctx.cwd, input.cwd) : ctx.cwd;
+    const now = checkouts(cwd);
+    if (!repositories.has(cwd)) repositories.set(cwd, now);
+    const roots = repositories.get(cwd)!;
     const parent = path.dirname(now[0] ?? "/");
     for (const dir of now) if (!roots.includes(dir) && !isRootLike(parent) && within(dir, parent)) roots.push(dir);
-    const scope = makeScope(ctx.cwd, guarded, {
+    const scope = makeScope(cwd, guarded, {
       rules: ctx.hasUI ? rules.ui : rules.headless,
       picked: pickedRules,
       piDirs: [AGENT_DIR],
@@ -1137,21 +1270,46 @@ export default function (pi: ExtensionAPI, overrides: Partial<Config> = {}) {
     });
     let subject: string;
     let verdict: Verdict;
-    if (typeof input.command === "string") {
+    const tool = event.toolName;
+    const paths = tool === "write" || tool === "edit" || tool === "ast_edit" ? targetPaths(input) : [];
+    if (tool === "bash" && typeof input.command === "string") {
       subject = input.command;
       verdict = bashVerdict(subject, scope);
-    } else if ((event.toolName === "write" || event.toolName === "edit") && typeof input.path === "string") {
-      subject = input.path;
-      verdict = fileVerdict(event.toolName, subject, scope);
-    } else if ((event.toolName === "read" || event.toolName === "grep") && typeof input.path === "string") {
-      // Reads are not checked, except for credential files.
-      const secret = readVerdict(event.toolName, input.path, scope);
+    } else if (tool === "write" && paths.length === 1 && paths[0].startsWith("xd://")) {
+      // A call to an omp device (xd://lsp, xd://github, ...): omp dispatches it as a call to that
+      // tool, which comes through this guard under its own name.
+      return undefined;
+    } else if (paths.length) {
+      // Every file the call changes is checked; the strictest verdict stands for the call.
+      const verdicts = paths.map((p) => fileVerdict(tool === "ast_edit" ? "edit" : tool, p, scope));
+      verdict = verdicts.reduce((a, b) => (SEVERITY[b.action] > SEVERITY[a.action] ? b : a));
+      subject = paths.join(", ");
+    } else if ((tool === "read" || tool === "grep") && typeof input.path === "string" && !isUrl(input.path)) {
+      // Reads of local files are not checked, except for credential files.
+      const secret = readVerdict(tool, input.path, scope);
       if (!secret) return undefined;
       subject = input.path;
       verdict = secret;
-    } else return undefined;
+    } else if (tool === "github" && GITHUB_READ_OPS.has(String(input.op))) return undefined;
+    else if (config.safeTools.includes(tool)) return undefined;
+    else if (tool === "eval" && typeof input.code === "string") {
+      // omp's eval runs Python or JavaScript in-process: the code is the action.
+      const language = input.language === "js" ? "JavaScript" : "Python";
+      subject = `eval (${language})\n${input.code}`;
+      verdict = { action: "classify", reason: `runs ${language} code with eval` };
+    } else {
+      // Any other tool (MCP, web_search, debug, a GitHub change, a read of a URL, an edit whose
+      // files omp could not name): the rules have no check for it, so it goes to the deciders with
+      // its name and whole input. A URL or a message can carry data out as well as a shell
+      // command can.
+      subject = `${tool} ${JSON.stringify(input ?? {})}`;
+      verdict = { action: "classify", reason: `${tool} is not a tool the rules check` };
+    }
 
-    const entry: Record<string, unknown> = { tool: event.toolName, cwd: ctx.cwd, subject: clip(subject, 4000), rule: verdict.action, reason: verdict.reason };
+    const entry: Record<string, unknown> = { tool: event.toolName, cwd, subject: clip(subject, 4000), rule: verdict.action, reason: verdict.reason };
+    // Subagent and advisor calls come through here too; the log says whose call it was.
+    const agent = (ctx as unknown as { agent?: { kind: string; name: string } }).agent;
+    if (agent && agent.kind !== "main") entry.agent = agent.name;
     const finish = (outcome: string, by: string) => {
       if (outcome === "allow") commitWrites(scope);
       log(config, { ...entry, outcome, by });
@@ -1162,9 +1320,9 @@ export default function (pi: ExtensionAPI, overrides: Partial<Config> = {}) {
     // A call allowed while it was not critical asks again once the same text is, for example a
     // script that a download has since replaced.
     // The scripts the call runs, read now. A script changed since the user allowed the call asks again.
-    const scripts = verdict.action === "classify" && verdict.files?.length ? readScripts(verdict.files, ctx.cwd, config.classifier.scripts.maxChars) : undefined;
+    const scripts = verdict.action === "classify" && verdict.files?.length ? readScripts(verdict.files, cwd, config.classifier.scripts.maxChars) : undefined;
     const scriptHash = scripts && "text" in scripts ? createHash("sha256").update(scripts.text).digest("hex").slice(0, 16) : "";
-    const key = `${verdict.critical ? "critical" : ""}\0${event.toolName}\0${ctx.cwd}\0${subject}\0${scriptHash}`;
+    const key = `${verdict.critical ? "critical" : ""}\0${event.toolName}\0${cwd}\0${subject}\0${scriptHash}`;
     // The user allowed this exact call for the session, so no model gets to block it again.
     if (verdict.action === "classify" && sessionAllowed.has(key)) {
       finish("allow", "session");
@@ -1191,19 +1349,21 @@ export default function (pi: ExtensionAPI, overrides: Partial<Config> = {}) {
         verdict = { ...verdict, reason: scripts.problem };
       } else if (scripts) entry.scriptChars = scripts.text.length;
       const steps: Record<string, unknown>[] = [];
+      // Why the call reached the chat decider, for the log.
+      if (chain[0] === "llm") entry.handoff = { why: verdict.ruleAsk ? `the rules ask: ${verdict.reason}` : scripts && "problem" in scripts ? scripts.problem : "the chat decider is the only decider" };
       for (const [i, stage] of chain.entries()) {
         if (stage === "llm") {
           toLlm = true;
           break;
         }
         const last = i === chain.length - 1;
-        const state: Record<string, string> = { tool: event.toolName, cwd: ctx.cwd, command: subject };
+        const state: Record<string, string> = { tool: event.toolName, cwd: cwd, command: subject };
         if (stage !== "command" && scripts && "text" in scripts && scripts.text) state.files = scripts.text;
         if (stage !== "command" && contextQuestions(config).size) {
           state.conversation = conversationFor(config, (ctx.sessionManager?.getBranch?.() ?? []) as { message?: Record<string, unknown> }[], { tool: event.toolName, input, id: event.toolCallId }, decided);
           entry.conversationChars = state.conversation.length;
         }
-        const result = await classify(config, state, ctx.signal, ctx.modelRegistry as unknown as Registry, stage);
+        const result = await classify(config, state, ctx.signal, hostRegistry(ctx.modelRegistry), stage);
         steps.push({ decider: stage, model: classifierName(config, stage), ...result });
         entry.steps = steps;
         const risk = "answers" in result ? flagged(config, result.answers, stage) : undefined;
@@ -1211,7 +1371,16 @@ export default function (pi: ExtensionAPI, overrides: Partial<Config> = {}) {
           verdict = { ...verdict, action: "ask", reason: risk };
           break;
         }
-        if (!last && ("error" in result || result.answers.risky >= config[stage].allowBelow)) continue;
+        if (!last && ("error" in result || result.answers.risky >= config[stage].allowBelow)) {
+          const c = config[stage] as ClassifierConfig;
+          entry.handoff = {
+            from: stage,
+            to: chain[i + 1],
+            why: "error" in result ? `no answer: ${result.error}` : `risky ${result.answers.risky.toFixed(3)} is between allowBelow ${c.allowBelow} and askAbove ${c.askAbove}`,
+            thresholds: { allowBelow: c.allowBelow, askAbove: c.askAbove, ...(c.context?.enabled ? { userApprovedAbove: c.context.userApprovedAbove, permissionAskAbove: c.context.permissionAskAbove } : {}) },
+          };
+          continue;
+        }
         if ("error" in result) {
           verdict = { ...verdict, action: "ask", reason: `model gave no answer: ${result.error}` };
           break;
@@ -1229,7 +1398,16 @@ export default function (pi: ExtensionAPI, overrides: Partial<Config> = {}) {
       const actionFiles = verdict.files?.length ? fileContents(verdict.files) : undefined;
       const items = transcriptItems(branch, llm, { tool: event.toolName, input, id: event.toolCallId, files: actionFiles }, decided);
       const decision = await decideWithLlm(config, items, ctx.signal, ctx.modelRegistry as unknown as ChatRegistry, ctx.model as unknown as Record<string, unknown>);
-      Object.assign(entry, { model: llmName(llm, ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined), llm: { stage: "stage" in decision ? decision.stage : undefined, tokens: "tokens" in decision ? decision.tokens : undefined } });
+      Object.assign(entry, {
+        model: llmName(llm, ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined),
+        llm: {
+          stage: "stage" in decision ? decision.stage : undefined,
+          tokens: "tokens" in decision ? decision.tokens : undefined,
+          ms: decision.ms,
+          params: { thinkingLevel: llm.thinkingLevel, twoStage: llm.twoStage, stage1MaxTokens: llm.stage1MaxTokens, maxTokens: llm.maxTokens, timeoutMs: llm.timeoutMs, contextWindow: decision.contextWindow, transcriptChars: decision.transcriptChars },
+          passes: decision.passes,
+        },
+      });
 
       if ("error" in decision) {
         entry.llmError = decision.error;
@@ -1311,9 +1489,21 @@ export default function (pi: ExtensionAPI, overrides: Partial<Config> = {}) {
     const covers = dir ? `changes in ${dir}` : verdict.pattern ? `"${verdict.pattern}"` : undefined;
     const forSession = covers ? `Allow ${covers} for this session` : "Allow for this session";
     const always = covers && !(verdict.pattern && verdict.fromAsk) ? `Always allow ${covers}` : undefined;
+    // Logged when shown as well as when answered: a prompt cancelled, timed out or left open when the
+    // session ends would otherwise leave no trace of why the call was held.
+    log(config, { ...entry, outcome: "ask", by: "prompt" });
     const answer = prompts.then(() => ctx.ui.select(title, ["Allow once", forSession, ...(always ? [always] : []), "Block"], { signal: ctx.signal }));
     prompts = answer.catch(() => undefined);
-    const choice = await answer;
+    let choice: string | undefined;
+    try {
+      choice = await answer;
+    } catch (e) {
+      counts.blocked++;
+      held("rejected-by-user");
+      log(config, { ...entry, outcome: "block", by: "prompt-error", error: (e as Error).message });
+      throw e;
+    }
+    if (choice === undefined) entry.cancelled = true;
     const wider = choice === forSession || (always !== undefined && choice === always);
     if (wider) {
       if (verdict.dir) allowedPaths.push(verdict.dir);
@@ -1363,7 +1553,7 @@ export default function (pi: ExtensionAPI, overrides: Partial<Config> = {}) {
         const extra = Object.keys(classifier.extraQuestions);
         return (
           (classifier.provider
-            ? `model ${classifier.provider}/${classifier.model} through Pi (commands are sent to ${classifier.provider})`
+            ? `model ${classifier.provider}/${classifier.model} through omp (commands are sent to ${classifier.provider})`
             : `model server ${classifier.endpoint}: ${(await health(config, 500)) ? "up" : "down"}`) +
           ` (asks at risk >= ${classifier.askAbove}${passes(stage, i)})${extra.length ? `, extra questions: ${extra.join(", ")}` : ""}`
         );

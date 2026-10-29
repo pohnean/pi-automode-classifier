@@ -21,6 +21,10 @@
   "allowedPaths": [],
   // More files or directories that count as this extension's own: changes to them always ask.
   "guardedPaths": [],
+  // Tools that run with no check at all. Every other tool the rules have no check for (MCP tools,
+  // browser, python, web_search, a read of a URL, other extensions' tools) goes to the deciders with
+  // its name and whole input. read/write/edit/grep of local files and bash keep their own checks.
+  "safeTools": ["grep", "glob", "find", "ast_grep", "lsp", "todo", "ask", "task", "checkpoint", "rewind", "wait", "yield", "think", "goal", "recall", "reflect", "context_notes", "new_context"],
 
   // When there is no UI to show a prompt (print mode, most subagents).
   "withoutUi": {
